@@ -1,0 +1,57 @@
+General csv Files and what to expect inside each one:
+
+csv_editing.py:
+This file exists for insights into the csv files that exist. This ensures that there is enough data
+To be reasonably used for training adn what the general trends look like
+This file is good to identify issues with a training set before it reaches the AI
+
+    This file creates the following files currently in the repository
+
+    - Crashes_by_city_and_day.csv/xisx: csv is a csv format while xisx is meant to be viewed
+    in excel. Compares the amount of crashes in each city each day
+
+    - Crashes_by_road.csv/xisx: Provides a long list of each road and how many crashes were reported on
+    each one. The function that created should return the median and average crashes per road.
+    This is good for assigning non-urgent roads inside of csv_overview.py
+
+csv_overview.py:
+This file exists to manipulate the data inside of a .csv file to create training data for the ai
+This file takes several minutes to fully run depending on the intial size of the csv file given to it
+
+    Patience is important when running this file
+
+    This file creates several CSVs. The naming convention is under the impression that the first csv will be named in the schema of:
+    <CountyName>County<Year>.csv
+
+    As an example DallasCounty2025.csv will be used
+
+    The follow files are created in order:
+    - DallasCounty2025_Modified.csv
+      <CountyName>County<Year>_Modified.csv
+
+      This file replaces the roads with less than the specified number of crashes with 'Non Critial Roads'
+      The point of this is to reduce the amount of roads that need to exprience time slicing. This could mean millions fewer entires in the training data
+
+    - DallasCounty2025_Modified_with_crash_labels.csv
+      <CountyName>County<Year>_Modified_with_crash_labels.csv
+
+      This file adds the crash column to the data to signify that a crash occured on this road. This will be important as negative sampling
+      which is a way to train AI needs to have some examples of when crashes didn't happen and this provides that difference
+
+    - road_reference.csv
+
+      This creates a list of all the roads and their general features such as if they are urban or rural as well as what city/county they are in
+      This will have a lot of No Data for the rural/urban flag
+      Will be important to generate consistant negative data
+
+    - negative_samples.csv
+
+      This creates the negative samples using road_reference and the <CountyName>County<Year>_Modified_with_crash_labels.csv
+      This will create for hour inside the year for each road listed in the modified data an incident of a crash not occuring
+      At present, the weather and road conditions are randomized, but this will be corrected
+
+    - TrainingData.csv
+
+      This combines the modified data and the negative samples
+      This does remove negative samples that happen in the same hour as positive (crash) samples
+      This takes the most amount of time to load, but is the final product
