@@ -7,6 +7,12 @@ def predict_risk(request: RiskRequest) -> RiskResponse:
     """
     Predict crash risk for a location.
 
+    Args:
+        request: RiskRequest with latitude, longitude, and optional context.
+
+    Returns:
+        RiskResponse with crash likelihood score (0–1), coordinates, and message.
+
     TODO: Replace with actual PyTorch model inference.
     For now returns a placeholder score based on coordinates.
     """

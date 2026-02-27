@@ -14,9 +14,11 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: create DB tables. Shutdown: cleanup if needed."""
-    Base.metadata.create_all(bind=engine)
+    """Startup: create DB tables. Shutdown: dispose engine."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     yield
+    await engine.dispose()
 
 
 app = FastAPI(
@@ -41,8 +43,8 @@ app.include_router(risk.router, prefix=settings.api_v1_prefix)
 
 
 @app.get("/")
-def root():
-    """Root endpoint."""
+def root() -> dict[str, str]:
+    """Return API info and links to documentation."""
     return {
         "message": "Road Report AI Backend",
         "docs": "/docs",
