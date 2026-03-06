@@ -6,12 +6,12 @@ import pandas as pd
 
 
 # This function removes all weather CSV columns except the ones needed for modeling:
-# Date, temperature, and precipitation metrics (DATE, TMP, AA1).
+# Date, visibility, temperature, and precipitation metrics (DATE, VIS, TMP, AA1).
 # It supports any input filename and can overwrite the source file or write to a new output file.
 def keep_weather_columns(
 	filename: str = "WeatherData.csv",
 	output_filename: str | None = None,
-	keep_columns: tuple[str, ...] = ("DATE", "TMP", "AA1"),
+	keep_columns: tuple[str, ...] = ("DATE", "VIS", "TMP", "AA1"),
 ) -> Path:
 	"""
 	Keep only selected weather columns in a CSV file.
@@ -50,6 +50,7 @@ def split_date_and_create_time_range(
 	output_filename: str | None = None,
 	date_column: str = "DATE",
 	time_column: str = "Time",
+	vis_column: str = "VIS",
 	tmp_column: str = "TMP",
 	aa1_column: str = "AA1",
 ) -> Path:
@@ -66,6 +67,7 @@ def split_date_and_create_time_range(
 			the input file is overwritten.
 		date_column (str): Source and destination date column name.
 		time_column (str): Name of the new time-range column.
+		vis_column (str): Source VIS column name to keep as-is.
 		tmp_column (str): Source TMP column to parse and normalize.
 		aa1_column (str): Source AA1 column to parse and normalize.
 		observation_column (str): New column name for the AA1 observation number.
@@ -97,6 +99,7 @@ def split_date_and_create_time_range(
 	date_time_parts = datetime_text.str.partition("T")
 	has_datetime_separator = datetime_text.str.contains("T", na=False)
 
+    # Extract the date part and create a time range based on the hour component.
 	date_part = date_time_parts[0].str.strip()
 	hour_part = date_time_parts[2].fillna("").str.strip().str.split(":", n=1).str[0]
 	valid_hours = hour_part.str.fullmatch(r"\d{1,2}")
@@ -110,9 +113,16 @@ def split_date_and_create_time_range(
 	formatted_hours = hour_numeric[valid_hour_range].astype(int).astype(str).str.zfill(2)
 	time_range.loc[rows_to_update_time] = formatted_hours + ":00-" + formatted_hours + ":59"
 
+    # Save the split date and new time range back to the DataFrame.
 	weather_df[date_column] = date_part
 	weather_df[time_column] = time_range
+	
+    # Process VIS column to collect the first argument and save it back to the VIS column.
+	visibility_text = weather_df[vis_column].astype(str).str.strip()
+	visibility_parts = visibility_text.str.split(",", n=1, expand=True)
+	weather_df[vis_column] = visibility_parts[0].str.strip()
 
+    # Process the TMP column to handle values like +0222,5 by removing the '+' and dividing by 10.
 	tmp_text = weather_df[tmp_column].astype(str).str.strip()
 	has_tmp_comma_format = tmp_text.str.contains(",", na=False)
 	tmp_parts = tmp_text.str.extract(r"^\s*([+-]?\d+)\s*(?:,.*)?$")
@@ -123,15 +133,17 @@ def split_date_and_create_time_range(
 	current_tmp_values = pd.to_numeric(weather_df[tmp_column], errors="coerce")
 	current_tmp_values.loc[has_tmp_comma_format] = (parsed_tmp / 10).loc[has_tmp_comma_format]
 	weather_df[tmp_column] = current_tmp_values
-
+	
+    # Process the AA1 column to handle values like <number>,<rainAmount>,<junk>,<junk> by extracting the rain amount and dividing by 10.
 	aa1_text = weather_df[aa1_column].astype(str).str.strip()
 	aa1_parts = aa1_text.str.extract(r"^\s*([^,]*)\s*,\s*([^,]*)")
-	has_aa1_comma_format = aa1_text.str.contains(",", na=False)
+	has_aa1_comma_format = aa1_text.str.contains(",", na=False) 
 	rain_amount = pd.to_numeric(aa1_parts[1], errors="coerce")
 	current_aa1_values = pd.to_numeric(weather_df[aa1_column], errors="coerce")
 	current_aa1_values.loc[has_aa1_comma_format] = (rain_amount / 10).loc[has_aa1_comma_format]
 	weather_df[aa1_column] = current_aa1_values
 
+    # Resolve the output CSV path, supporting both absolute and relative paths, and save the modified DataFrame.
 	if output_filename:
 		output_path = Path(output_filename)
 		if not output_path.is_absolute():
@@ -267,13 +279,14 @@ def create_ice_flag(
 	return output_path
 
 
-# This function removes rows where there is no ice risk and no precipitation.
+# This function removes rows where there is no ice risk, no precipitation, and visibility greater than 1000 meters
 # Rows are dropped when ICE_FLAG == 0 and AA1 == 0.
 def remove_non_ice_zero_precip_rows(
 	filename: str = "WeatherData.csv",
 	output_filename: str | None = None,
 	ice_flag_column: str = "ICE_FLAG",
 	precip_column: str = "AA1",
+	vis_column: str = "VIS",
 ) -> Path:
 	"""
 	Drop rows where ICE_FLAG is 0 and AA1 is 0.
@@ -284,6 +297,7 @@ def remove_non_ice_zero_precip_rows(
 			the input file is overwritten.
 		ice_flag_column (str): Ice flag column name.
 		precip_column (str): Precipitation column name.
+		vis_column (str): Visibility column name.
 
 	Returns:
 		Path: The path where the filtered CSV was saved.
@@ -291,21 +305,31 @@ def remove_non_ice_zero_precip_rows(
 	Raises:
 		ValueError: If ICE_FLAG or AA1 columns do not exist in the CSV.
 	"""
+	
+    # Resolve the input CSV path, supporting both absolute and relative paths.
 	csv_path = Path(filename)
 	if not csv_path.is_absolute():
 		csv_path = Path(__file__).parent / csv_path
 
 	weather_df = pd.read_csv(csv_path)
 
+    # Validate that required columns exist before processing.
 	if ice_flag_column not in weather_df.columns:
 		raise ValueError(f"Column '{ice_flag_column}' was not found in {csv_path}")
 	if precip_column not in weather_df.columns:
 		raise ValueError(f"Column '{precip_column}' was not found in {csv_path}")
+	if vis_column not in weather_df.columns:
+		raise ValueError(f"Column '{vis_column}' was not found in {csv_path}")
 
+    # Convert the relevant columns to numeric, coercing errors to NaN, for accurate filtering.
 	ice_flag_values = pd.to_numeric(weather_df[ice_flag_column], errors="coerce")
 	precip_values = pd.to_numeric(weather_df[precip_column], errors="coerce")
+	vis_values = pd.to_numeric(weather_df[vis_column], errors="coerce")
 
-	rows_to_drop = ice_flag_values.eq(0) & precip_values.eq(0)
+    # Keep low-visibility rows (VIS < 10000) regardless of other conditions.
+	low_vis_rows = vis_values.lt(10000).fillna(False)
+	no_ice_and_rain_rows = ice_flag_values.eq(0) & precip_values.eq(0)
+	rows_to_drop = no_ice_and_rain_rows & ~low_vis_rows
 	filtered_df = weather_df.loc[~rows_to_drop]
 
 	if output_filename:
@@ -316,6 +340,119 @@ def remove_non_ice_zero_precip_rows(
 		output_path = csv_path
 
 	filtered_df.to_csv(output_path, index=False)
+	return output_path
+
+
+# This function creates the final weather export used by downstream modeling.
+# It reads WeatherData.csv and writes FinalWeather.csv with Date, Hour, Weather, and Road columns.
+def create_final_weather_csv(
+	filename: str = "WeatherData.csv",
+	output_filename: str | None = "FinalWeather.csv",
+	date_column: str = "DATE",
+	hour_column: str = "Time",
+	tmp_column: str = "TMP",
+	precip_column: str = "AA1",
+	vis_column: str = "VIS",
+	ice_flag_column: str = "ICE_FLAG",
+	road_column_name: str = "Road",
+) -> Path:
+	"""
+	Create FinalWeather.csv with Date, Hour, Weather, and Road columns.
+
+	Weather mapping rules:
+	- If precipitation > 0 and TMP > 0: "3 - RAIN"
+	- If precipitation > 0 and TMP < 0: "5 - SNOW"
+	- If no precipitation and VIS <= 1000: "6 - FOG"
+	- If no precipitation and VIS <= 10000: "2 - CLOUDY"
+	- If no precipitation and VIS > 10000: "1 - CLEAR"
+
+	Road mapping rules:
+	- If no precipitation and ICE_FLAG != 1: "1 - DRY"
+	- If ICE_FLAG != 1 and AA1 < 3.0: "2 - WET"
+	- If ICE_FLAG != 1 and AA1 >= 3.0: "3 - STANDING WATER"
+	- If ICE_FLAG == 1 and TMP == 0: "6 - ICE"
+	- If ICE_FLAG == 1 and TMP != 0: "5 - SLUSH"
+
+	Args:
+		filename (str): Input WeatherData CSV filename or path.
+		output_filename (str | None): Output CSV filename/path. Defaults to FinalWeather.csv.
+		date_column (str): Date source column.
+		hour_column (str): Hour source column (typically Time).
+		tmp_column (str): Temperature source column.
+		precip_column (str): Precipitation source column.
+		vis_column (str): Visibility source column.
+		ice_flag_column (str): Ice flag source column. If missing, defaults to no-ice behavior.
+		road_column_name (str): Output road column name.
+
+	Returns:
+		Path: The path where FinalWeather.csv was saved.
+
+	Raises:
+		ValueError: If required source columns are missing.
+	"""
+	csv_path = Path(filename)
+	if not csv_path.is_absolute():
+		csv_path = Path(__file__).parent / csv_path
+
+	weather_df = pd.read_csv(csv_path)
+
+	required_columns = [date_column, hour_column, tmp_column, precip_column, vis_column]
+	missing_columns = [column for column in required_columns if column not in weather_df.columns]
+	if missing_columns:
+		raise ValueError(f"Missing required column(s): {', '.join(missing_columns)}")
+
+	tmp_values = pd.to_numeric(weather_df[tmp_column], errors="coerce")
+	precip_values = pd.to_numeric(weather_df[precip_column], errors="coerce")
+	vis_values = pd.to_numeric(weather_df[vis_column], errors="coerce")
+	if ice_flag_column in weather_df.columns:
+		ice_flag_values = pd.to_numeric(weather_df[ice_flag_column], errors="coerce")
+	else:
+		ice_flag_values = pd.Series(0, index=weather_df.index, dtype="float64")
+
+	final_df = pd.DataFrame()
+	final_df["Date"] = weather_df[date_column]
+	final_df["Hour"] = weather_df[hour_column]
+	final_df["Weather"] = "1 - CLEAR"
+	final_df[road_column_name] = "1 - DRY"
+
+	is_precip = precip_values.gt(0)
+	is_no_precip = precip_values.le(0) | precip_values.isna()
+
+	fog_mask = is_no_precip & vis_values.le(1000)
+	cloudy_mask = is_no_precip & vis_values.le(10000)
+	rain_mask = is_precip & tmp_values.gt(0)
+	snow_mask = is_precip & tmp_values.lt(0)
+
+	# Visibility affects weather only when there is no precipitation.
+	final_df.loc[cloudy_mask, "Weather"] = "2 - CLOUDY"
+	final_df.loc[fog_mask, "Weather"] = "6 - FOG"
+	# Precipitation takes priority over visibility.
+	final_df.loc[rain_mask, "Weather"] = "3 - RAIN"
+	final_df.loc[snow_mask, "Weather"] = "5 - SNOW"
+
+	is_ice_flag = ice_flag_values.eq(1)
+	is_no_ice_flag = ~is_ice_flag
+
+	dry_mask = is_no_ice_flag & is_no_precip
+	wet_mask = is_no_ice_flag & is_precip & precip_values.lt(3.0)
+	standing_water_mask = is_no_ice_flag & precip_values.ge(3.0)
+	ice_mask = is_ice_flag & tmp_values.eq(0)
+	slush_mask = is_ice_flag & ~tmp_values.eq(0)
+
+	final_df.loc[dry_mask, road_column_name] = "1 - DRY"
+	final_df.loc[wet_mask, road_column_name] = "2 - WET"
+	final_df.loc[standing_water_mask, road_column_name] = "3 - STANDING WATER"
+	final_df.loc[ice_mask, road_column_name] = "6 - ICE"
+	final_df.loc[slush_mask, road_column_name] = "5 - SLUSH"
+
+	if output_filename:
+		output_path = Path(output_filename)
+		if not output_path.is_absolute():
+			output_path = Path(__file__).parent / output_path
+	else:
+		output_path = csv_path.with_name("FinalWeather.csv")
+
+	final_df.to_csv(output_path, index=False)
 	return output_path
 
 
@@ -408,17 +545,17 @@ if __name__ == "__main__":
 	# ("remove_empty_aa1",)
 	# ("create_ice_flag",)
 	# ("remove_non_ice_zero_precip_rows",)
+	# {create_final_weather_csv}
 	# ("keep_columns", "split_date_time", "remove_empty_aa1", "create_ice_flag", "remove_non_ice_zero_precip_rows")
-	STEPS_TO_RUN = (
-		"keep_columns",
-		"split_date_time",
-		"remove_empty_aa1",
-		"create_ice_flag",
-		"remove_non_ice_zero_precip_rows",
-	)
+	# You can customize this tuple to run only the steps you want, in the order you want.
+	STEPS_TO_RUN = ("keep_columns", "split_date_time", "remove_empty_aa1", "create_ice_flag", "remove_non_ice_zero_precip_rows")
 
 	output_path = run_weather_cleaning_steps(
 		args,
 		steps_to_run=STEPS_TO_RUN,
 	)
+	
+	create_final_weather_csv()
+
+
 	print(f"Saved filtered CSV to: {output_path}")
