@@ -221,12 +221,56 @@ def add_crash_column(filepath, output_filename=None):
         print(f"Error adding 'Crash' column: {e}")
         return None
 
+def _hour_key_from_range(hour_text: str) -> str | None:
+    # Handles "13:00-13:59" and "13:00 - 13:59"
+    if pd.isna(hour_text):
+        return None
+    s = str(hour_text).strip().replace(" ", "")
+    return s.split(":")[0] if ":" in s else None
+
+def _build_weather_lookup(final_weather_path: str) -> dict[tuple[str, str], tuple[str, str]]:
+    """
+    Returns lookup:
+      (date_str, hour_key) -> (weather_condition, surface_condition)
+    Uses the most frequent Weather/Road pair if duplicates exist in FinalWeather.
+    """
+    if not final_weather_path or not os.path.exists(final_weather_path):
+        return {}
+
+    wdf = pd.read_csv(final_weather_path)
+
+    required_cols = {"Date", "Hour", "Weather", "Road"}
+    missing = required_cols - set(wdf.columns)
+    if missing:
+        raise ValueError(f"FinalWeather.csv missing columns: {sorted(missing)}")
+
+    wdf["Date"] = wdf["Date"].astype(str).str.strip()
+    wdf["hour_key"] = wdf["Hour"].apply(_hour_key_from_range)
+    wdf["Weather"] = wdf["Weather"].astype(str).str.strip()
+    wdf["Road"] = wdf["Road"].astype(str).str.strip()
+
+    wdf = wdf.dropna(subset=["Date", "hour_key", "Weather", "Road"])
+
+    combo_counts = (
+        wdf.groupby(["Date", "hour_key", "Weather", "Road"])
+        .size()
+        .reset_index(name="count")
+        .sort_values(["Date", "hour_key", "count"], ascending=[True, True, False])
+    )
+
+    lookup = {}
+    for _, row in combo_counts.iterrows():
+        key = (row["Date"], row["hour_key"])
+        if key not in lookup:
+            lookup[key] = (row["Weather"], row["Road"])
+
+    return lookup
 
 # This will loop through all the modified roads (Non Critical Road) and create negative samples for each road, each hour, and each day of the year
 # This function will take a few minutes to run and will update the user of its progress in the console log
 # Out put is negative_samples.csv
 #*************At present, it does not contain any way to reasonably predict weather ************************
-def create_negative_samples(road_reference_file, output_filename="negative_samples.csv"):
+def create_negative_samples(road_reference_file, output_filename="negative_samples.csv", final_weather_file='FinalWeather.csv'):
     """
     Create negative samples (non-crash events) for every road, every hour, every day of 2025.
     Uses random weather and surface conditions, but takes road attributes from road_reference.csv.
@@ -234,7 +278,7 @@ def create_negative_samples(road_reference_file, output_filename="negative_sampl
     Args:
         road_reference_file (str): Path to the road reference CSV
         output_filename (str): Name for the output file
-        
+        final_weather_file (str | None): Path to the final weather CSV for lookup. If None, random weather is used.
     Returns:
         dict: Summary statistics about the generated data
     """
@@ -242,24 +286,15 @@ def create_negative_samples(road_reference_file, output_filename="negative_sampl
         # Read the road reference data
         road_df = pd.read_csv(road_reference_file)
         
-        # Define possible values for random fields
-        weather_conditions = [
-            "1 - CLEAR",
-            "2 - CLOUDY",
-            "3 - RAIN",
-            "4 - SLEET/HAIL",
-            "5 - SNOW",
-            "6 - FOG"
-        ]
-        
-        surface_conditions = [
-            "1 - DRY",
-            "2 - WET",
-            "3 - STANDING WATER",
-            "5 - SLUSH",
-            "6 - ICE"
-        ]
-        
+        # Check if final weather file exists
+        if(final_weather_file and os.path.exists(final_weather_file)):
+            weather_lookup = _build_weather_lookup(final_weather_file)
+            print(f"Weather lookup built from {final_weather_file} with {len(weather_lookup)} entries.")
+        else:
+            weather_lookup = {}
+            print(f"No valid FinalWeather file found at {final_weather_file}. Cancelling negative sample generation.")
+            return None
+
         # Days of week
         days_of_week = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
         
@@ -267,8 +302,8 @@ def create_negative_samples(road_reference_file, output_filename="negative_sampl
         start_date = datetime(2025, 1, 1)
         end_date = datetime(2025, 12, 31, 23, 59, 59)
         
-        negative_samples = []
-        crash_id_counter = 30000000  # Start with a high number to avoid conflicts
+        rows = []
+        crash_id_counter = 30000000
         
         print("\n" + "=" * 70)
         print("GENERATING NEGATIVE SAMPLES")
@@ -278,70 +313,57 @@ def create_negative_samples(road_reference_file, output_filename="negative_sampl
         print("-" * 70)
         
         # Iterate through each road
-        for idx, road in road_df.iterrows():
-            if idx % 50 == 0:
-                print(f"Processing road {idx + 1}/{len(road_df)}: {road['Road Name']}")
-            
-            # For each hour of each day in 2025
-            current_date = start_date
-            while current_date <= end_date:
-                for hour in range(24):
-                    # Create time string
-                    time_str = f"{hour:02d}{random.randint(0, 59):02d}"
-                    hour_range = f"{hour:02d}:00 - {hour:02d}:59"
-                    
-                    # Random weather and surface conditions
-                    weather = random.choice(weather_conditions)
-                    surface = random.choice(surface_conditions)
-                    
-                    # Create the negative sample record
-                    record = {
-                        'Crash ID': crash_id_counter,
-                        'City': road['City'],
-                        'County': road['County'],
-                        'Crash Date': current_date.strftime('%Y-%m-%d'),
-                        'Crash Month': current_date.month,
-                        'Crash Time': time_str,
-                        'Crash Year': 2025,
-                        'Day of Week': days_of_week[current_date.weekday()],
-                        'Hour of Day': hour_range,
-                        'Road Class': 'CITY STREET',  # Simplified
-                        'Rural Urban Type': road['Rural Urban Type'],
-                        'Street Name': road['Road Name'],
-                        'Surface Condition': surface,
-                        'Weather Condition': weather,
-                        'Crash': 0  # Non-crash event
-                    }
-                    
-                    negative_samples.append(record)
+        current_date = start_date
+        while current_date <= end_date:
+            date_str = current_date.strftime("%Y-%m-%d")
+            day_name = current_date.strftime("%A").upper()
+            if(current_date.day == 1 and current_date.hour == 0):
+                print(f"Processing Month: {current_date.strftime('%B %Y')} ({date_str}) - Day: {day_name}")
+
+            for hour in range(24):
+                hour_key = f"{hour:02d}"
+                hour_range = f"{hour:02d}:00 - {hour:02d}:59"
+
+                weather_condition, surface_condition = weather_lookup.get(
+                    (date_str, hour_key),
+                    ("1 - CLEAR", "1 - DRY")
+                )
+
+                for _, road in road_df.iterrows():
+                    rows.append({
+                        "Crash ID": crash_id_counter,
+                        "City": road["City"],
+                        "County": road["County"],
+                        "Crash Date": date_str,
+                        "Crash Month": current_date.month,
+                        "Crash Time": f"{hour:02d}00",
+                        "Crash Year": 2025,
+                        "Day of Week": day_name,
+                        "Hour of Day": hour_range,
+                        "Road Class": "CITY STREET",
+                        "Rural Urban Type": road["Rural Urban Type"],
+                        "Street Name": road["Road Name"],
+                        "Surface Condition": surface_condition,
+                        "Weather Condition": weather_condition,
+                        "Crash": 0
+                    })
                     crash_id_counter += 1
+
                 
                 # Move to next day
-                current_date += timedelta(days=1)
-        
-        # Create DataFrame
-        negative_df = pd.DataFrame(negative_samples)
-        
-        # Save to CSV
+            current_date += timedelta(days=1)
+
+        negative_df = pd.DataFrame(rows)
+
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        output_file = os.path.join(script_dir, output_filename)
-        negative_df.to_csv(output_file, index=False)
-        
-        # Print summary
-        print("-" * 70)
-        print(f"\n✓ Negative samples generated successfully!")
-        print(f"  Total records: {len(negative_df):,}")
-        print(f"  Total roads: {len(road_df)}")
-        print(f"  Records per road: {len(negative_df) // len(road_df):,}")
-        print(f"  Output file: {output_file}")
-        print("=" * 70)
-        
-        return {
-            'total_records': len(negative_df),
-            'total_roads': len(road_df),
-            'output_file': output_file
-        }
-        
+        output_path = os.path.join(script_dir, output_filename)
+        negative_df.to_csv(output_path, index=False)
+
+        print(f"[OK] Negative samples saved: {output_path}")
+        print(f"[OK] Total records: {len(negative_df):,}")
+
+        return {"total_records": len(negative_df), "output_file": output_path}
+
     except Exception as e:
         print(f"Error creating negative samples: {e}")
         return None
@@ -471,63 +493,127 @@ def combine_crash_and_negative_samples(crash_file, negative_file, output_filenam
         traceback.print_exc()
         return None
 
-
-# Main function
-# Functions Called in order:
-# 1. identify_and_replace_non_critical_roads - Replace low crash roads with 'Non Critical Road' and create modified CSV
-# 2. add_crash_column - Add 'Crash' column to the modified CSV with all values set to 1
-# 3. create_road_reference_csv - Create a reference CSV with unique road information for negative sampling
-# 4. create_negative_samples - Generate negative samples for every road, hour, and day of 2025
-# 5. combine_crash_and_negative_samples - Combine the crash samples with the negative samples
-if __name__ == "__main__":
+def _abs_in_script_dir(filename: str) -> str:
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_file = os.path.join(script_dir, "DallasCounty2025.csv")
-    
-    if not os.path.exists(csv_file):
-        print(f"Error: File not found at {csv_file}")
-        exit(1)
-    
-    # Run the analysis and create modified CSV
-    result = identify_and_replace_non_critical_roads(csv_file, crash_threshold=12)
+    return os.path.join(script_dir, filename)
 
-    # Add the 'Crash' column to the modified CSV
-    if result:
-        add_crash_result = add_crash_column(result['output_file'])
-        if add_crash_result:
-            print(f"\n[OK] 'Crash' column added successfully to {add_crash_result['output_file']}")
-        else:
-            print("\n[error] Failed to add 'Crash' column.")
+# ...existing code...
+import argparse
+import sys
+import os
 
-    # If the modified CSV was created successfully, create the road reference CSV
-    create_road_reference_csv(result['output_file']) if result else print("Skipping road reference CSV creation due to previous errors.")
+def _abs_in_script_dir(filename: str) -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, filename)
 
-    if result:
-        print(f"\n[OK] Process complete!")
-        print(f"  Output file: {result['output_file']}")
+def run_all_pipeline(input_csv: str, weather_csv: str | None, threshold: int) -> int:
+    """
+    Full pipeline:
+    1) identify_and_replace_non_critical_roads
+    2) add_crash_column
+    3) create_road_reference_csv
+    4) create_negative_samples
+    5) combine_crash_and_negative_samples
+    """
+    print("[INFO] Step 1/5: Identify and replace non-critical roads")
+    step1 = identify_and_replace_non_critical_roads(input_csv, crash_threshold=threshold)
+    if not step1 or "output_file" not in step1:
+        print("[ERROR] Step 1 failed.")
+        return 1
+    modified_csv = step1["output_file"]
 
-    road_reference = os.path.join(script_dir, "road_reference.csv")
+    print("[INFO] Step 2/5: Add crash label column")
+    labeled_name = f"{os.path.splitext(os.path.basename(modified_csv))[0]}_with_crash_label.csv"
+    step2 = add_crash_column(modified_csv, labeled_name)
+    if not step2 or "output_file" not in step2:
+        print("[ERROR] Step 2 failed.")
+        return 1
+    crash_labeled_csv = step2["output_file"]
 
-    # Create negative samples
-    if os.path.exists(road_reference):
-        print("Starting negative sample generation...")
-        print("This will take a few minutes...")
-        result_neg = create_negative_samples(road_reference)
-        if result_neg:
-            print(f"\n[OK] Complete! Generated {result_neg['total_records']:,} negative samples")
-    else:
-        print(f"[error] Road reference file not found at {road_reference}")
+    print("[INFO] Step 3/5: Create road reference CSV")
+    step3 = create_road_reference_csv(modified_csv)
+    if not step3 or "output_file" not in step3:
+        print("[ERROR] Step 3 failed.")
+        return 1
+    road_reference_csv = step3["output_file"]
 
-    # Combine crash and negative samples
-    crash_file = os.path.join(script_dir, "DallasCounty2025_Modified_with_crash_label.csv")
-    negative_file = os.path.join(script_dir, "negative_samples.csv")
-    
-    if os.path.exists(crash_file) and os.path.exists(negative_file):
-        print("\nStarting training data combination...")
-        training_result = combine_crash_and_negative_samples(crash_file, negative_file)
-        if training_result:
-            print(f"\n[OK] Training data ready!")
-    else:
-        if not os.path.exists(crash_file):
-            print(f"[error] Crash file not found: {crash_file}")
-        if not os.path.exists(negative_file):
-            print(f"[error] Negative samples file not found: {negative_file}")
+    print("[INFO] Step 4/5: Create negative samples")
+    step4 = create_negative_samples(
+        road_reference_file=road_reference_csv,
+        output_filename="negative_samples.csv",
+        final_weather_file=weather_csv
+    )
+    if not step4 or "output_file" not in step4:
+        print("[ERROR] Step 4 failed.")
+        return 1
+    negative_csv = step4["output_file"]
+
+    print("[INFO] Step 5/5: Combine into TrainingData.csv")
+    step5 = combine_crash_and_negative_samples(
+        crash_file=crash_labeled_csv,
+        negative_file=negative_csv,
+        output_filename="TrainingData.csv"
+    )
+    if not step5 or "output_file" not in step5:
+        print("[ERROR] Step 5 failed.")
+        return 1
+
+    print(f"[OK] Pipeline complete: {step5['output_file']}")
+    return 0
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="CSV editing pipeline for Road Report AI")
+    parser.add_argument(
+        "--mode",
+        choices=["all", "replace", "label", "roadref", "negative", "combine"],
+        default="all",
+        help="Which step to run (default: all)"
+    )
+    parser.add_argument("--input", default="DallasCounty2025.csv", help="Input crash CSV")
+    parser.add_argument("--modified", default="DallasCounty2025_Modified.csv", help="Modified CSV path")
+    parser.add_argument("--labeled", default="DallasCounty2025_Modified_with_crash_label.csv", help="Crash-labeled CSV path")
+    parser.add_argument("--roadref", default="road_reference.csv", help="Road reference CSV path")
+    parser.add_argument("--negative", default="negative_samples.csv", help="Negative samples CSV path")
+    parser.add_argument("--weather", default="FinalWeather.csv", help="FinalWeather CSV path")
+    parser.add_argument("--threshold", type=int, default=12, help="Non-critical crash threshold")
+
+    args = parser.parse_args()
+
+    input_csv = _abs_in_script_dir(args.input)
+    modified_csv = _abs_in_script_dir(args.modified)
+    labeled_csv = _abs_in_script_dir(args.labeled)
+    roadref_csv = _abs_in_script_dir(args.roadref)
+    negative_csv = _abs_in_script_dir(args.negative)
+    weather_csv = _abs_in_script_dir(args.weather)
+
+    if args.mode == "all":
+        sys.exit(run_all_pipeline(input_csv, weather_csv, args.threshold))
+
+    if args.mode == "replace":
+        result = identify_and_replace_non_critical_roads(input_csv, crash_threshold=args.threshold)
+        sys.exit(0 if result else 1)
+
+    if args.mode == "label":
+        result = add_crash_column(modified_csv, os.path.basename(labeled_csv))
+        sys.exit(0 if result else 1)
+
+    if args.mode == "roadref":
+        result = create_road_reference_csv(modified_csv)
+        sys.exit(0 if result else 1)
+
+    if args.mode == "negative":
+        result = create_negative_samples(
+            road_reference_file=roadref_csv,
+            output_filename=os.path.basename(negative_csv),
+            final_weather_file=weather_csv
+        )
+        sys.exit(0 if result else 1)
+
+    if args.mode == "combine":
+        result = combine_crash_and_negative_samples(
+            crash_file=labeled_csv,
+            negative_file=negative_csv,
+            output_filename="TrainingData.csv"
+        )
+        sys.exit(0 if result else 1)
