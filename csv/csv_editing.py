@@ -505,7 +505,7 @@ def _abs_in_script_dir(filename: str) -> str:
 #   #   #   #   #   #   #   #   #   #   #   #
 
 if __name__ == "__main__":
-    file = _abs_in_script_dir("Stupid.csv")
+    file = _abs_in_script_dir("Dallas2025.csv")
 
     # This controls what commands get run
     # what_to_run[0] = add crash column to modified csv
