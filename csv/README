@@ -1,0 +1,23 @@
+Procure Data for csv_editing.py from: https://cris.dot.state.tx.us/public/Query/app/query-builder/disclaimer
+
+Procure Data for weather from: https://www.ncei.noaa.gov/access/search/data-search/global-hourly
+
+In order to run the 'csv_editing.py' script, you will need to get your data.csv and weather.csv (names do not matter)
+
+# # # # # # # # # # # # # # # # # WARNING
+
+This process will take several minutes
+Sometimes there will be updates in the console, but these can be infrequent
+
+# # # # # # # # # # # # # # # # # WARNING
+
+1. Remove the query information from the downloaded CSV files. Everything up to the column headers should be removed. The column headers should be the first line of the file.
+2. Place the CSV files in the same directory as 'csv_editing.py'
+3. Enter the names of your files in csv_weather.py and csv_editing.py in the below locations
+
+csv_weather.py: Line 562
+csv_editing.py: Line 523
+
+4. Run csv_weather.py first
+5. Run csv_editor.py second
+6. Result should be TrainingData.csv
