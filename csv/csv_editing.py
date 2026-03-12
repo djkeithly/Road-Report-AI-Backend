@@ -505,6 +505,9 @@ def _abs_in_script_dir(filename: str) -> str:
 #   #   #   #   #   #   #   #   #   #   #   #
 
 if __name__ == "__main__":
+    #   #   #   #   #   #   #   #   # 
+    #           File Path           #
+    #   #   #   #   #   #   #   #   # 
     file = _abs_in_script_dir("Dallas2025.csv")
 
     # This controls what commands get run
@@ -514,9 +517,9 @@ if __name__ == "__main__":
     # what_to_run[3] = create negative samples
     # what_to_run[4] = combine crash and negative samples into training data csv
 
-    #   #   #   #   #   #   #   #   #
-    #   All these should be TRUE    #
-    #   #   #   #   #   #   #   #   # 
+    #   #   #   #   #   #   #   #   #   #   #   #   #
+    #           All these should be TRUE            #
+    #   #   #   #   #   #   #   #   #   #   #   #   #
     what_to_run = [True, True, True, True, True]
 
     # Gets the year

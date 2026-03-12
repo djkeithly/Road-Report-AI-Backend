@@ -4,11 +4,14 @@ from typing import Callable
 
 import pandas as pd
 
+#	#	#	#	#	#	#	#	#
+#  			Step 1				#
+#	#	#	#	#	#	#	#	#
 
 # This function removes all weather CSV columns except the ones needed for modeling:
 # Date, visibility, temperature, and precipitation metrics (DATE, VIS, TMP, AA1).
 # It supports any input filename and can overwrite the source file or write to a new output file.
-def keep_weather_columns(
+def remove_uneeded_columns(
 	filename: str = "WeatherData.csv",
 	output_filename: str | None = None,
 	keep_columns: tuple[str, ...] = ("DATE", "VIS", "TMP", "AA1"),
@@ -42,6 +45,9 @@ def keep_weather_columns(
 	filtered_df.to_csv(output_path, index=False)
 	return output_path
 
+#	#	#	#	#	#	#	#	#
+#  			Step 2				#
+#	#	#	#	#	#	#	#	#
 
 # This function splits DATE values formatted like YYYY:MM:DDTHH:MM:SS.
 # It saves the date-only part back to DATE and creates a Time column as HH:00-HH:59.
@@ -154,6 +160,9 @@ def split_date_and_create_time_range(
 	weather_df.to_csv(output_path, index=False)
 	return output_path
 
+#	#	#	#	#	#	#	#	#
+#  			Step 3				#
+#	#	#	#	#	#	#	#	#
 
 # This function removes rows where AA1 has null, empty, or whitespace-only values.
 # It supports any input filename and can overwrite the source file or write to a new output file.
@@ -200,6 +209,9 @@ def remove_rows_with_empty_aa1(
 	filtered_df.to_csv(output_path, index=False)
 	return output_path
 
+#	#	#	#	#	#	#	#	#
+#  			Step 4				#
+#	#	#	#	#	#	#	#	#
 
 # This function creates an ice risk flag from temperature and precipitation.
 # Rule 1: If TMP <= 0 and AA1 > 0, set ICE_FLAG = 1.
@@ -278,6 +290,9 @@ def create_ice_flag(
 	weather_df.to_csv(output_path, index=False)
 	return output_path
 
+#	#	#	#	#	#	#	#	#
+#  			Step 5				#
+#	#	#	#	#	#	#	#	#
 
 # This function removes rows where there is no ice risk, no precipitation, and visibility greater than 1000 meters
 # Rows are dropped when ICE_FLAG == 0 and AA1 == 0.
@@ -342,6 +357,9 @@ def remove_non_ice_zero_precip_rows(
 	filtered_df.to_csv(output_path, index=False)
 	return output_path
 
+#	#	#	#	#	#	#	#	#
+#  			Step 6				#
+#	#	#	#	#	#	#	#	#
 
 # This function creates the final weather export used by downstream modeling.
 # It reads WeatherData.csv and writes FinalWeather.csv with Date, Hour, Weather, and Road columns.
@@ -455,7 +473,9 @@ def create_final_weather_csv(
 	final_df.to_csv(output_path, index=False)
 	return output_path
 
-
+#	#	#	#	#	#	#	#	#
+#  			Main				#
+#	#	#	#	#	#	#	#	#
 
 # This helper parses command-line arguments so the script can be used directly from terminal.
 def parse_args() -> argparse.Namespace:
@@ -483,7 +503,7 @@ def parse_args() -> argparse.Namespace:
 # Add new functions here as they are created.
 WeatherCleaningStep = Callable[[str, str | None], Path]
 WEATHER_CLEANING_STEPS: dict[str, WeatherCleaningStep] = {
-	"keep_columns": keep_weather_columns,
+	"remove_columns": remove_uneeded_columns,
 	"split_date_time": split_date_and_create_time_range,
 	"remove_empty_aa1": remove_rows_with_empty_aa1,
 	"create_ice_flag": create_ice_flag,
@@ -533,29 +553,53 @@ def run_weather_cleaning_steps(
 	return final_output
 
 
-# Main function
+# Main functions
 if __name__ == "__main__":
-	"""Entry point for command-line usage."""
-	args = parse_args()
+	#	#	#	#	#	#	#	#	#
+	# 			File Path			#
+	#	#	#	#	#	#	#	#	#
+	# Change this one line to choose the starting weather CSV file.
+	STARTING_WEATHER_FILE = "WeatherStart.csv"
 
-	# Pick steps by name, in order.
+	# Optional output file for the final weather CSV.
+	FINAL_WEATHER_OUTPUT_FILE = "FinalWeather.csv"
+
+	# Pick cleaning steps by name, in order.
 	# Examples:
 	# ("keep_columns",)
 	# ("split_date_time",)
 	# ("remove_empty_aa1",)
 	# ("create_ice_flag",)
 	# ("remove_non_ice_zero_precip_rows",)
-	# {create_final_weather_csv}
 	# ("keep_columns", "split_date_time", "remove_empty_aa1", "create_ice_flag", "remove_non_ice_zero_precip_rows")
-	# You can customize this tuple to run only the steps you want, in the order you want.
-	STEPS_TO_RUN = ("keep_columns", "split_date_time", "remove_empty_aa1", "create_ice_flag", "remove_non_ice_zero_precip_rows")
+	STEPS_TO_RUN = (
+		"remove_columns",
+		"split_date_time",
+		"remove_empty_aa1",
+		"create_ice_flag",
+		"remove_non_ice_zero_precip_rows",
+	)
 
-	output_path = run_weather_cleaning_steps(
+	args = argparse.Namespace(
+		filename=STARTING_WEATHER_FILE,
+		output_filename=None,
+	)
+
+	cleaned_weather_path = run_weather_cleaning_steps(
 		args,
 		steps_to_run=STEPS_TO_RUN,
 	)
 	
-	create_final_weather_csv()
+	print(f"Saved cleaned weather CSV to: {cleaned_weather_path}")
 
-
-	print(f"Saved filtered CSV to: {output_path}")
+	# Only create final weather CSV if required steps have been run.
+	# create_final_weather_csv requires "remove_non_ice_zero_precip_rows" step to create the Time column.
+	# given this is last step, all data should be present or an error should appear earlier if missing.
+	if "remove_non_ice_zero_precip_rows" in STEPS_TO_RUN:
+		final_weather_path = create_final_weather_csv(
+			filename=str(cleaned_weather_path),
+			output_filename=FINAL_WEATHER_OUTPUT_FILE,
+		)
+		print(f"Saved final weather CSV to: {final_weather_path}")
+	else:
+		print("Skipped final weather CSV creation (requires 'remove_non_ice_zero_precip_rows' step).")
