@@ -1,0 +1,34 @@
+# Stack: Python 3.12, FastAPI, PostgreSQL, PyTorch, Pandas, NumPy
+
+## 1. Core Python & FastAPI Guidelines
+- Use Python 3.12 syntax and strictly adhere to PEP 8 formatting guidelines.
+- Write functional, declarative code and avoid classes unless absolutely necessary (e.g., Pydantic models, SQLAlchemy schemas).
+- Use `def` for pure, synchronous functions and `async def` for I/O-bound or asynchronous operations.
+- Enforce Python type hints across all function signatures, parameters, and return values.
+- Use the Receive an Object, Return an Object (RORO) pattern.
+- Choose descriptive variable names with auxiliary verbs for booleans (e.g., `is_processed`, `has_risk_score`).
+
+## 2. API Design & Validation
+- Follow RESTful API design principles and use FastAPI's `APIRouter` for clear, modular routing.
+- Rely exclusively on Pydantic `BaseModel` (v2) for robust request input validation and response serialization.
+- Utilize FastAPI's dependency injection system for managing database sessions and shared states.
+- Minimize blocking operations in routes by using dedicated async functions for database transactions and external API requests (like your Google Maps or Weather integrations).
+
+## 3. Database & ORM (PostgreSQL)
+- Use SQLAlchemy 2.0 for all ORM features and database interactions.
+- Avoid raw SQL queries unless absolutely necessary for specific performance bottlenecks.
+- Use asynchronous database drivers (like `asyncpg`) to ensure the API response time stays under your 2-second goal.
+- Rely on Alembic for handling all PostgreSQL database migrations.
+
+## 4. Machine Learning & PyTorch Integration
+- Maintain a clear project separation between data preprocessing, model definition, training loops, and API evaluation.
+- Utilize Pandas and NumPy for constructing efficient data cleaning and feature engineering pipelines.
+- Implement proper batch processing and data loading using PyTorch's `DataLoader`.
+- Leverage PyTorch's autograd for automatic differentiation during model iteration.
+- Ensure the model's numerical crash likelihood score is strictly typed and quickly serialized by Pydantic before being returned to the frontend.
+
+## 5. Error Handling & Performance
+- Handle errors and edge cases at the very beginning of functions using early returns to avoid deeply nested `if` statements.
+- Use FastAPI's `HTTPException` for expected API errors and model them as specific HTTP response codes.
+- Prefer lifespan context managers over `@app.on_event("startup")` for managing application startup and shutdown events.
+- Document all complex functions, ML pipelines, and endpoints with clear Google-style docstrings to help the rest of the team understand the codebase.
