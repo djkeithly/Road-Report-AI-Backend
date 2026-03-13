@@ -27,8 +27,8 @@ Important keys:
 - `WEATHER_API_BASE_URL`
 - `WEATHER_USER_AGENT`
 - `WEATHER_TIMEOUT_SECONDS`
-- `MODEL_FILE_PATH`
-- `MODEL_VERSION`
+- `MODEL_FILE_PATH="ml/artifacts/latest-model.pt"`
+- `MODEL_VERSION="baseline-v1"`
 
 ## 3) Train the Model
 
