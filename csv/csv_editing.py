@@ -5,6 +5,7 @@ import os
 import pandas as pd
 from datetime import datetime, timedelta
 import math
+import re
 
 #   #   #   #   #   #   #   #   #   #   #   #
 #               Step 1 Functions            #
@@ -13,16 +14,30 @@ import math
 # A basic function that takes a CSV file and adds a row called Crash and sets all the values in the file to 1, indicating a crash
 # This allows for negative sampling, or the ability to differentiate between crash and non crash events in the dataset
 # This will be critical to actually training an AI model
+def _extract_hour_bucket(value):
+    """Return hour as string without leading zeros (e.g., '01:00 - 01:59' -> '1')."""
+    if pd.isna(value):
+        return value
+
+    text = str(value).strip()
+    match = re.match(r"^(\d{1,2})", text)
+    if not match:
+        return text
+
+    return str(int(match.group(1)))
+
+
 def add_crash_column(filepath):
     """
     Add a 'Crash' column to the CSV file with all values set to 1.
     This indicates that all rows in the dataset represent crash events.
-    
+    Removes a 'Crash ID' column if present.
+
     Args:
         filepath (str): Path to the input CSV file
         output_filename (str): Optional custom output filename/path.
             If None, the input file is updated in place.
-        
+
     Returns:
         dict: Dictionary containing:
             - 'total_rows': Number of rows processed
@@ -31,7 +46,12 @@ def add_crash_column(filepath):
     try:
         # Read the CSV file
         df = pd.read_csv(filepath)
-        
+
+        # Clean up step
+        df = df.drop(columns=["Crash ID", "Average Daily Traffic Amount"], errors="ignore")
+        if "Hour of Day" in df.columns:
+            df["Hour of Day"] = df["Hour of Day"].apply(_extract_hour_bucket)
+
         # Add the 'Crash' column with all values set to 1
         df['Crash'] = 1
         
@@ -54,7 +74,43 @@ def add_crash_column(filepath):
     except Exception as e:
         print(f"Error adding 'Crash' column: {e}")
         return None
-    
+
+
+def combine_street_name_and_segment(filepath):
+    """
+    Combine 'Street Name' and 'Section' into a single 'Street Name' column
+    in the format '<Street Name> <Section>', then drop the 'Section' column.
+    If 'Section' is 'No Data', the street name is left unchanged for that row.
+
+    Args:
+        filepath (str): Path to the input CSV file.
+    """
+    try:
+        df = pd.read_csv(filepath)
+
+        if "Street Name" in df.columns and "Section" in df.columns:
+            # Only append section where it has meaningful data
+            mask = df["Section"].astype(str) != "No Data"
+            df.loc[mask, "Street Name"] = (
+                df.loc[mask, "Street Name"].astype(str)
+                + " S"
+                + df.loc[mask, "Section"].astype(str)
+            )
+            df = df.drop(columns=["Section"])
+
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            if os.path.isabs(filepath):
+                output_file = filepath
+            else:
+                output_file = os.path.join(script_dir, filepath)
+
+            df.to_csv(output_file, index=False)
+        else:
+            print("Columns 'Street Name' and/or 'Section' not found; no changes made.")
+
+    except Exception as e:
+        print(f"Error combining 'Street Name' and 'Section': {e}")
+
 #   #   #   #   #   #   #   #   #   #   #   #
 #               Step 2 Functions            #
 #   #   #   #   #   #   #   #   #   #   #   #
@@ -409,8 +465,8 @@ def combine_crash_and_negative_samples(crash_file, negative_file="NegativeSample
             if pd.isna(row['Street Name']):
                 continue
             
-            # Extract hour from 'Hour of Day' field (e.g., "23:00 - 23:59" -> "23")
-            hour = row['Hour of Day'].split(':')[0]
+            # Normalize hour regardless of source format (range or integer-like)
+            hour = _extract_hour_bucket(row['Hour of Day'])
             
             # Create a tuple key: (street_name, crash_date, hour)
             event_key = (
@@ -433,8 +489,8 @@ def combine_crash_and_negative_samples(crash_file, negative_file="NegativeSample
             if pd.isna(row['Street Name']):
                 continue
             
-            # Extract hour from 'Hour of Day' field
-            hour = row['Hour of Day'].split(':')[0]
+            # Normalize hour regardless of source format (range or integer-like)
+            hour = _extract_hour_bucket(row['Hour of Day'])
             
             # Create event key for this negative sample
             event_key = (
@@ -511,45 +567,51 @@ if __name__ == "__main__":
     file = _abs_in_script_dir("Dallas2025.csv")
 
     # This controls what commands get run
-    # what_to_run[0] = add crash column to modified csv
-    # what_to_run[1] = identify and replace non critical roads and create modified csv
-    # what_to_run[2] = create road reference csv
-    # what_to_run[3] = create negative samples
-    # what_to_run[4] = combine crash and negative samples into training data csv
+    # what_to_run[0] = add crash column to modified csv and remove crash id column
+    # what_to_run[1] = combine street name and segment into single street name column
+    # what_to_run[2] = identify and replace non critical roads and create modified csv
+    # what_to_run[3] = create road reference csv
+    # what_to_run[4] = create negative samples
+    # what_to_run[5] = combine crash and negative samples into training data csv
 
     #   #   #   #   #   #   #   #   #   #   #   #   #
     #           All these should be TRUE            #
     #   #   #   #   #   #   #   #   #   #   #   #   #
-    what_to_run = [True, True, True, True, True]
+    what_to_run = [True, True, False, False, False, False]
 
     # Gets the year
     file_year = int(pd.read_csv(file, nrows=1)["Crash Year"].iloc[0])
 
     if(what_to_run[0]):
-        print("Task[1/5]: Adding crash column...")
+        print("Task[1/6]: Adding crash column...")
         add_crash_column(file)
         print("Crash column added to modified CSV.\n")
 
     average_crashes = get_average_crashes_per_road(file)
 
     if(what_to_run[1]):
-        print("Task[2/5]: Removing non critical roads and creating modified CSV...")
+        print("Task[2/6]: Combining street name and segment...")
+        combine_street_name_and_segment(file)
+        print("Street name and segment combined.\n")
+
+    if(what_to_run[2]):
+        print("Task[3/6]: Removing non critical roads and creating modified CSV...")
         identify_and_replace_non_critical_roads(file, crash_threshold=average_crashes)
         print("Non critical roads replaced and modified CSV created.\n")
 
     modified_file = _abs_in_script_dir(f"{os.path.splitext(os.path.basename(file))[0]}_modified.csv")
-    if(what_to_run[2]):
-        print("Task[3/5]: Creating road reference CSV...")
+    if(what_to_run[3]):
+        print("Task[4/6]: Creating road reference CSV...")
         create_road_reference_csv(modified_file)
         print("Road reference CSV created.\n")
 
-    if(what_to_run[3]):
-        print("Task[4/5]: Creating negative samples...")
+    if(what_to_run[4]):
+        print("Task[5/6]: Creating negative samples...")
         create_negative_samples(file_year, road_reference_file="RoadReference.csv", final_weather_file='FinalWeather.csv', output_filename="NegativeSamples.csv")
         print("Negative samples created.\n")    
 
-    if(what_to_run[4]):
-        print("Task[5/5]: Combining crash and negative samples into training data...")
+    if(what_to_run[5]):
+        print("Task[6/6]: Combining crash and negative samples into training data...")
         combine_crash_and_negative_samples(crash_file=modified_file, negative_file="NegativeSamples.csv", output_filename="TrainingData.csv")
         print("Training data created.\n")
     
