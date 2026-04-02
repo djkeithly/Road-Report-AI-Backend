@@ -75,6 +75,9 @@ def add_crash_column(filepath):
         print(f"Error adding 'Crash' column: {e}")
         return None
 
+#   #   #   #   #   #   #   #   #   #   #   #
+#               Step 2 Functions            #
+#   #   #   #   #   #   #   #   #   #   #   #
 
 def combine_street_name_and_segment(filepath):
     """
@@ -112,7 +115,7 @@ def combine_street_name_and_segment(filepath):
         print(f"Error combining 'Street Name' and 'Section': {e}")
 
 #   #   #   #   #   #   #   #   #   #   #   #
-#               Step 2 Functions            #
+#               Step 3 Functions            #
 #   #   #   #   #   #   #   #   #   #   #   #
 
 def get_average_crashes_per_road(filepath):
@@ -191,7 +194,7 @@ def identify_and_replace_non_critical_roads(filepath, crash_threshold=12):
         return None
     
 #   #   #   #   #   #   #   #   #   #   #   #
-#               Step 3 Functions            #
+#               Step 4 Functions            #
 #   #   #   #   #   #   #   #   #   #   #   #
 
 # This file creates a general reference CSV with information about each type of unique road in the dataset
@@ -250,7 +253,7 @@ def create_road_reference_csv(filepath):
         return None
 
 #   #   #   #   #   #   #   #   #   #   #   #
-#               Step 4 Functions            #
+#               Step 5 Functions            #
 #   #   #   #   #   #   #   #   #   #   #   #
 
 # This will loop through all the modified roads (Non Critical Road) and create negative samples for each road, each hour, and each day of the year
