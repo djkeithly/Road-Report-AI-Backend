@@ -117,3 +117,7 @@ WEATHER_API_BASE_URL=https://api.weather.gov
 WEATHER_USER_AGENT=(roadreportai.prod, your-email@example.com)
 WEATHER_TIMEOUT_SECONDS=6.0
 ```
+
+Notes:
+- Do not wrap `MODEL_FILE_PATH` in quotes in Render env vars.
+- `WEATHER_USER_AGENT` should include app identifier and contact (email is fine).

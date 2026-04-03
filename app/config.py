@@ -93,6 +93,16 @@ class Settings(BaseSettings):
             return 6.0
         return value
 
+    @field_validator("model_file_path", mode="before")
+    @classmethod
+    def parse_model_file_path(cls, value: Any) -> Any:
+        """Normalize MODEL_FILE_PATH and support quoted env values."""
+        if value == "":
+            return "ml/artifacts/latest-model.pt"
+        if isinstance(value, str):
+            return value.strip().strip("\"'")
+        return value
+
 
 @lru_cache
 def get_settings() -> Settings:

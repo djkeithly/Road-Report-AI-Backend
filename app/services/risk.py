@@ -147,6 +147,9 @@ def _load_model_bundle() -> dict[str, object] | None:
     """Load trained model and metadata used for online inference."""
     settings = get_settings()
     model_path = Path(settings.model_file_path)
+    if not model_path.is_absolute():
+        # Resolve relative model paths from backend project root.
+        model_path = Path(__file__).resolve().parents[2] / model_path
     metadata_path = model_path.with_suffix(".meta.json")
     if not model_path.exists() or not metadata_path.exists():
         return None
@@ -224,6 +227,8 @@ def get_model_runtime_metadata() -> dict[str, str | int | float | bool]:
     """Return model artifact metadata for runtime diagnostics and UI display."""
     settings = get_settings()
     model_path = Path(settings.model_file_path)
+    if not model_path.is_absolute():
+        model_path = Path(__file__).resolve().parents[2] / model_path
     metadata_path = model_path.with_suffix(".meta.json")
     if not model_path.exists() or not metadata_path.exists():
         return {
