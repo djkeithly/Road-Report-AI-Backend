@@ -98,3 +98,22 @@ Use in `POST /api/v1/risk/predict`:
 | GET | `/api/v1/health/model` |
 | GET | `/api/v1/risk/model-metrics` |
 | POST | `/api/v1/risk/predict` |
+
+## 6) Render Deployment (Model-prototype)
+
+- Deploy from branch: `Model-prototype`
+- Build command: `pip install -r requirements.txt`
+- Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+
+Required env variables for production:
+
+```env
+API_V1_PREFIX=/api/v1
+DEBUG=false
+CORS_ORIGINS_CSV=https://road-report-ai-frontend.vercel.app
+MODEL_FILE_PATH=ml/artifacts/latest-model.pt
+MODEL_VERSION=baseline-v1
+WEATHER_API_BASE_URL=https://api.weather.gov
+WEATHER_USER_AGENT=(roadreportai.prod, your-email@example.com)
+WEATHER_TIMEOUT_SECONDS=6.0
+```

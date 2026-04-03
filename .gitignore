@@ -17,5 +17,3 @@ __pycache__/
 
 # Keep generated training data and local model artifacts out of git
 csv/TrainingData.csv
-ml/artifacts/latest-model.pt
-ml/artifacts/*.meta.json
