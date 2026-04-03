@@ -59,7 +59,7 @@ input_dim = X_tensor.shape[1]
 # 4. Initialize Model, Loss Function, and Optimizer
 model = LogisticRegression(input_dim)
 criterion = nn.BCEWithLogitsLoss()
-learning_rate = 0.01
+learning_rate = 0.0075
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
 # ==========================================
@@ -109,6 +109,57 @@ else:
 # ==========================================
 # Testing Custom Values
 # ==========================================
+
+banding_dataset = [
+    {
+        # "Crash ID": [30000283],
+        "City": ["DALLAS"],
+        "County": ["DALLAS"],
+        # "Crash Date": ["2025-01-01"],
+        "Crash Month": ["1"],
+        "Crash Time": ["0"],
+        # "Crash Year": ["2025"],
+        # "Day of Week": ["WEDNESDAY"],
+        # "Hour of Day": ["00:00 - 00:59"],
+        # "Road Class": ["CITY STREET"],
+        "Rural Urban Type": ["LARGE URBANIZED (200,000+)"],
+        "Street Name": ["S I 35E S"],
+        "Surface Condition": ["1 - DRY"],
+        "Weather Condition": ["1 - CLEAR"],
+    },
+    {
+        # "Crash ID": [30000283],
+        "City": ["DALLAS"],
+        "County": ["DALLAS"],
+        # "Crash Date": ["2025-01-01"],
+        "Crash Month": ["1"],
+        "Crash Time": ["0"],
+        # "Crash Year": ["2025"],
+        # "Day of Week": ["WEDNESDAY"],
+        # "Hour of Day": ["00:00 - 00:59"],
+        # "Road Class": ["CITY STREET"],
+        "Rural Urban Type": ["No Data"],
+        "Street Name": ["S I 35E S"],
+        "Surface Condition": ["1 - DRY"],
+        "Weather Condition": ["1 - CLEAR"],
+    },
+    {
+        # "Crash ID": [30000283],
+        "City": ["DALLAS"],
+        "County": ["DALLAS"],
+        # "Crash Date": ["2025-01-01"],
+        "Crash Month": ["1"],
+        "Crash Time": ["0"],
+        # "Crash Year": ["2025"],
+        # "Day of Week": ["WEDNESDAY"],
+        # "Hour of Day": ["00:00 - 00:59"],
+        # "Road Class": ["CITY STREET"],
+        "Rural Urban Type": ["No Data"],
+        "Street Name": ["S I 35E S"],
+        "Surface Condition": ["2 - WET"],
+        "Weather Condition": ["3 - RAIN"],
+    },
+]
 my_custom_data_set = [
     {
         # "Crash ID": [30000283],
@@ -174,7 +225,85 @@ my_custom_data_set = [
         "Surface Condition": ["2 - WET"],
         "Weather Condition": ["3 - RAIN"],
     },
+    {
+        # "Crash ID": [30000283],
+        "City": ["ARLINGTON"],
+        "County": ["ARLINGTON"],
+        # "Crash Date": ["2025-01-01"],
+        "Crash Month": ["1"],
+        "Crash Time": ["0"],
+        # "Crash Year": ["2025"],
+        # "Day of Week": ["WEDNESDAY"],
+        # "Hour of Day": ["00:00 - 00:59"],
+        # "Road Class": ["CITY STREET"],
+        "Rural Urban Type": ["LARGE URBANIZED (200,000+)"],
+        "Street Name": ["S I 35E S"],
+        "Surface Condition": ["2 - WET"],
+        "Weather Condition": ["3 - RAIN"],
+    },
+    {
+        # "Crash ID": [30000283],
+        "City": ["DALLAS"],
+        "County": ["DALLAS"],
+        # "Crash Date": ["2025-01-01"],
+        "Crash Month": ["1"],
+        "Crash Time": ["0"],
+        # "Crash Year": ["2025"],
+        # "Day of Week": ["WEDNESDAY"],
+        # "Hour of Day": ["00:00 - 00:59"],
+        # "Road Class": ["CITY STREET"],
+        "Rural Urban Type": ["LARGE URBANIZED (200,000+)"],
+        "Street Name": ["BUCKINGHAM RD"],
+        "Surface Condition": ["1 - DRY"],
+        "Weather Condition": ["1 - CLEAR"],
+    },
+    {
+        # "Crash ID": [30000283],
+        "City": ["ARLINGTON"],
+        "County": ["ARLINGTON"],
+        # "Crash Date": ["2025-01-01"],
+        "Crash Month": ["1"],
+        "Crash Time": ["0"],
+        # "Crash Year": ["2025"],
+        # "Day of Week": ["WEDNESDAY"],
+        # "Hour of Day": ["00:00 - 00:59"],
+        # "Road Class": ["CITY STREET"],
+        "Rural Urban Type": ["LARGE URBANIZED (200,000+)"],
+        "Street Name": ["S I 35E S"],
+        "Surface Condition": ["1 - DRY"],
+        "Weather Condition": ["1 - CLEAR"],
+    },
 ]
+
+banding_cutoff = [0, 0, 0]
+iter = 0
+for band_item in banding_dataset:
+    # Convert your custom data into a Pandas DataFrame
+    custom_df = pd.DataFrame(band_item)
+
+    # Drop the same columns you dropped during training
+    custom_df = custom_df.drop(columns=drop_cols, errors="ignore")
+
+    # One-Hot Encode your custom data
+    custom_encoded = pd.get_dummies(custom_df)
+
+    # Align columns using the feature_columns (either newly created or loaded from pickle!)
+    custom_aligned = custom_encoded.reindex(columns=feature_columns, fill_value=0)
+
+    # Convert to a PyTorch Tensor
+    custom_tensor = torch.tensor(custom_aligned.to_numpy(dtype=np.float32))
+
+    # Run the Prediction
+    model.eval()
+    with torch.no_grad():
+        raw_logits = model(custom_tensor)
+        probability = torch.sigmoid(raw_logits)
+        predicted_class = (probability >= 0.5).float()
+
+    print("\nBanding cutoff for: ", iter)
+    print(f"Predicted Probability: {probability.item():.4f}")
+    banding_cutoff[iter] = probability.item()
+    iter += 1
 
 for my_custom_data in my_custom_data_set:
     # Convert your custom data into a Pandas DataFrame
@@ -201,4 +330,9 @@ for my_custom_data in my_custom_data_set:
 
     print("\n--- Custom Value Prediction ---")
     print(f"Predicted Probability: {probability.item():.4f}")
-    print(f"Predicted Class: {int(predicted_class.item())}")
+    score = 3
+    for i in range(3):
+        if probability.item() > banding_cutoff[i]:
+            score = i
+            break
+    print("Risk Score: ", i)
