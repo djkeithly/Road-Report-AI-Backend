@@ -7,7 +7,13 @@ import pandas as pd
 import torch
 
 TARGET_COLUMN = "crash"
-NUMERIC_FEATURE_COLUMNS = ["crashmonth", "crashyear", "crashtime_minutes", "hour_bucket"]
+NUMERIC_FEATURE_COLUMNS = [
+    "crashmonth",
+    "crashyear",
+    "crashtime_minutes",
+    "hour_bucket",
+    "street_crash_rate",
+]
 CATEGORICAL_FEATURE_COLUMNS = [
     "city",
     "county",
@@ -27,6 +33,7 @@ TRAINING_COLUMNS = [
     "hourofday",
     "roadclass",
     "ruralurbantype",
+    "streetname",
     "surfacecondition",
     "weathercondition",
     "crash",
@@ -108,12 +115,32 @@ def _parse_crash_label(value: str | int | float) -> int:
     return 1 if text.lower() in {"true", "yes", "y"} else 0
 
 
+def _normalize_street_name(value: str | int | float | None) -> str:
+    """Normalize street names for stable crash-rate encoding."""
+    if value is None:
+        return "unknown"
+    text = str(value).strip().lower()
+    return text if text else "unknown"
+
+
 def build_feature_table(*, dataframe: pd.DataFrame) -> dict[str, pd.DataFrame | pd.Series]:
     """Build encoded features and binary labels from normalized training data."""
     shaped = dataframe.copy()
     shaped["crashtime_minutes"] = shaped["crashtime"].map(_parse_crash_time_minutes)
     shaped["hour_bucket"] = shaped["hourofday"].map(_parse_hour_bucket)
     shaped[TARGET_COLUMN] = shaped[TARGET_COLUMN].map(_parse_crash_label).astype(np.float32)
+    shaped["streetname_norm"] = shaped["streetname"].map(_normalize_street_name)
+
+    street_crash_rate_map = (
+        shaped.groupby("streetname_norm")[TARGET_COLUMN].mean().astype(np.float32).to_dict()
+    )
+    global_street_crash_rate = float(shaped[TARGET_COLUMN].mean())
+    shaped["street_crash_rate"] = (
+        shaped["streetname_norm"]
+        .map(street_crash_rate_map)
+        .fillna(global_street_crash_rate)
+        .astype(np.float32)
+    )
 
     numeric_features = (
         shaped[NUMERIC_FEATURE_COLUMNS]
@@ -130,13 +157,20 @@ def build_feature_table(*, dataframe: pd.DataFrame) -> dict[str, pd.DataFrame | 
     )
     labels = shaped[TARGET_COLUMN]
 
-    return {"features": all_features, "labels": labels}
+    return {
+        "features": all_features,
+        "labels": labels,
+        "street_crash_rate_map": street_crash_rate_map,
+        "global_street_crash_rate": global_street_crash_rate,
+    }
 
 
 def build_inference_feature_vector(
     *,
     row: dict[str, str | int | float | None],
     feature_columns: list[str],
+    street_crash_rate_map: dict[str, float] | None = None,
+    global_street_crash_rate: float | None = None,
 ) -> np.ndarray:
     """Encode a single inference row into the trained feature-column order."""
     frame = pd.DataFrame([row])
@@ -150,6 +184,13 @@ def build_inference_feature_vector(
 
     normalized["crashtime_minutes"] = normalized["crashtime"].map(_parse_crash_time_minutes)
     normalized["hour_bucket"] = normalized["hourofday"].map(_parse_hour_bucket)
+    street_name = _normalize_street_name(normalized["streetname"].iloc[0])
+    default_rate = 0.0 if global_street_crash_rate is None else global_street_crash_rate
+    if street_crash_rate_map is None:
+        street_rate = default_rate
+    else:
+        street_rate = float(street_crash_rate_map.get(street_name, default_rate))
+    normalized["street_crash_rate"] = np.float32(street_rate)
 
     numeric_features = (
         normalized[NUMERIC_FEATURE_COLUMNS]

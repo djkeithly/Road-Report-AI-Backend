@@ -159,6 +159,8 @@ def _load_model_bundle() -> dict[str, object] | None:
 
     input_size = int(metadata["input_size"])
     feature_columns = list(metadata["feature_columns"])
+    street_crash_rate_map = metadata.get("street_crash_rate_map", {})
+    global_street_crash_rate = float(metadata.get("global_street_crash_rate", 0.0))
     threshold = float(metadata.get("threshold", 0.5))
 
     model = BaselineCrashRiskModel(input_size=input_size)
@@ -168,6 +170,8 @@ def _load_model_bundle() -> dict[str, object] | None:
     return {
         "model": model,
         "feature_columns": feature_columns,
+        "street_crash_rate_map": street_crash_rate_map,
+        "global_street_crash_rate": global_street_crash_rate,
         "threshold": threshold,
     }
 
@@ -190,6 +194,7 @@ def _build_inference_row(
         "hourofday": hour_text,
         "roadclass": requested_value_or_dash(request.road_class),
         "ruralurbantype": "Unknown",
+        "streetname": requested_value_or_dash(request.road_name),
         "surfacecondition": "Unknown",
         "weathercondition": weather_condition or "Unknown",
     }
@@ -214,6 +219,8 @@ def _infer_model_probability(
     vector = build_inference_feature_vector(
         row=row,
         feature_columns=bundle["feature_columns"],
+        street_crash_rate_map=bundle["street_crash_rate_map"],
+        global_street_crash_rate=bundle["global_street_crash_rate"],
     )
     tensor = torch.from_numpy(np.asarray([vector], dtype=np.float32))
     model = bundle["model"]

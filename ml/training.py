@@ -184,6 +184,8 @@ def run_training_pipeline(
         metadata={
             "input_size": int(tensors["input_size"]),
             "feature_columns": list(shaped["features"].columns),
+            "street_crash_rate_map": shaped["street_crash_rate_map"],
+            "global_street_crash_rate": shaped["global_street_crash_rate"],
             "threshold": best_threshold,
             "rows_used": int(len(dataframe)),
             "test_ratio": test_ratio,
