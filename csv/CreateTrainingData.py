@@ -1,0 +1,12 @@
+from weather.csv_geocode import geocode
+import sys
+
+# Rare manual entry point.
+# Transforms a file called isd-history.csv in the same directory into geocoded.csv, which is used by other scripts.
+# state and ctry can be modified here, but the default is to geocode all US stations in Texas, which is the main area of interest for this project.
+if __name__ == "__main__":
+    if "--geocode" in sys.argv:
+        state = "TX"
+        ctry = "US"
+        print(f"Geocoding {ctry} {state}...")
+        geocode(ctry=ctry, state=state)

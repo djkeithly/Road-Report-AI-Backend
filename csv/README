@@ -1,5 +1,23 @@
 Procure Data for csv_editing.py from: https://cris.dot.state.tx.us/public/Query/app/query-builder/disclaimer
 
+
+
+
+
+
+
+
+
+
+
+In the case that isd-history.csv or geocode.csv is missed:
+
+Download isd-history.csv: https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.ncei.noaa.gov/pub/data/noaa/isd-history.csv&ved=2ahUKEwjR-NW6u9CTAxUjmSYFHfWuOH8QFnoECAwQAQ&usg=AOvVaw3K8oxIQwTSdqoixdzTGvA3
+
+Place the file inside csv/weather then run
+
+py csv/CreateTrainingData.py --geocode
+_______________________________________________________________________________________________________
 Procure Data for weather from: https://www.ncei.noaa.gov/access/search/data-search/global-hourly
 
 In order to run the 'csv_editing.py' script, you will need to get your data.csv and weather.csv (names do not matter)

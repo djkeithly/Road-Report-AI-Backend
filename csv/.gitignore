@@ -1,2 +1,7 @@
 *.csv
 *.xlsx
+
+# Save these files
+
+!weather/geocoded.csv
+!weather/isd-history.csv
