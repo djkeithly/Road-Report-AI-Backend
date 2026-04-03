@@ -125,6 +125,26 @@ def _build_components(
     return components, warnings
 
 
+def _infer_road_class_from_name(road_name: str | None) -> str | None:
+    """Infer coarse road class from road name patterns."""
+    if not road_name:
+        return None
+    text = road_name.strip().lower()
+    if not text:
+        return None
+    if text.startswith(("i-", "ih", "interstate")):
+        return "INTERSTATE"
+    if text.startswith(("us ", "us-", "us/")):
+        return "US & STATE HIGHWAYS"
+    if text.startswith(("sh", "state highway", "hwy", "highway")):
+        return "US & STATE HIGHWAYS"
+    if "toll" in text or "turnpike" in text or "tpke" in text:
+        return "TOLLWAY"
+    if text.startswith("fm") or "farm to market" in text:
+        return "FARM TO MARKET"
+    return "CITY STREET"
+
+
 def requested_value_or_dash(value: str | None) -> str:
     """Return fallback marker used by frontend details cards."""
     if not value:
@@ -286,10 +306,11 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
 
     query_time = request.query_time_iso or datetime.now(tz=UTC)
     weather_condition = request.weather_condition or weather.short_forecast
+    inferred_road_class = request.road_class or _infer_road_class_from_name(request.road_name)
     components, component_warnings = _build_components(
         latitude=request.latitude,
         longitude=request.longitude,
-        road_class=request.road_class,
+        road_class=inferred_road_class,
         weather_condition=weather_condition,
         temperature_f=weather.temperature_f,
     )
@@ -304,16 +325,27 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
 
     risk_score = heuristic_score
     if model_score is not None:
-        risk_score = model_score
         if road_feature_matched is False:
             warnings.append(
                 "Road name not found in trained street keys; model used global street prior."
             )
+        has_live_weather = weather.source == "weather.gov" and weather.short_forecast is not None
+        confidence = 0.55
+        if road_feature_matched is True:
+            confidence += 0.20
+        if has_live_weather:
+            confidence += 0.15
+        confidence = max(0.35, min(0.90, confidence))
+        risk_score = (confidence * model_score) + ((1.0 - confidence) * heuristic_score)
         if model_threshold is not None and model_score >= model_threshold:
             warnings.append(
                 f"Model threshold alert: probability {model_score:.2f} exceeds "
                 f"threshold {model_threshold:.2f}."
             )
+        warnings.append(
+            f"Blended score uses {int(round(confidence * 100))}% model confidence "
+            "and context fallback weighting."
+        )
     else:
         warnings.append("Model artifact unavailable; using deterministic fallback scoring.")
 
