@@ -116,7 +116,7 @@ def _parse_crash_label(value: str | int | float) -> int:
     return 1 if text.lower() in {"true", "yes", "y"} else 0
 
 
-def _normalize_street_name(value: str | int | float | None) -> str:
+def normalize_street_name(value: str | int | float | None) -> str:
     """Normalize street names for stable crash-rate encoding."""
     if value is None:
         return "unknown"
@@ -151,13 +151,18 @@ def _normalize_street_name(value: str | int | float | None) -> str:
     return normalized if normalized else "unknown"
 
 
+def _normalize_street_name(value: str | int | float | None) -> str:
+    """Backward-compatible wrapper for internal callers."""
+    return normalize_street_name(value)
+
+
 def build_feature_table(*, dataframe: pd.DataFrame) -> dict[str, pd.DataFrame | pd.Series]:
     """Build encoded features and binary labels from normalized training data."""
     shaped = dataframe.copy()
     shaped["crashtime_minutes"] = shaped["crashtime"].map(_parse_crash_time_minutes)
     shaped["hour_bucket"] = shaped["hourofday"].map(_parse_hour_bucket)
     shaped[TARGET_COLUMN] = shaped[TARGET_COLUMN].map(_parse_crash_label).astype(np.float32)
-    shaped["streetname_norm"] = shaped["streetname"].map(_normalize_street_name)
+    shaped["streetname_norm"] = shaped["streetname"].map(normalize_street_name)
 
     street_crash_rate_map = (
         shaped.groupby("streetname_norm")[TARGET_COLUMN].mean().astype(np.float32).to_dict()
@@ -212,7 +217,7 @@ def build_inference_feature_vector(
 
     normalized["crashtime_minutes"] = normalized["crashtime"].map(_parse_crash_time_minutes)
     normalized["hour_bucket"] = normalized["hourofday"].map(_parse_hour_bucket)
-    street_name = _normalize_street_name(normalized["streetname"].iloc[0])
+    street_name = normalize_street_name(normalized["streetname"].iloc[0])
     default_rate = 0.0 if global_street_crash_rate is None else global_street_crash_rate
     if street_crash_rate_map is None:
         street_rate = default_rate

@@ -22,7 +22,7 @@ from app.schemas.risk import (
 )
 from app.services.weather import get_fallback_weather_snapshot, get_weather_snapshot
 from ml.model import BaselineCrashRiskModel, load_model_state
-from ml.preprocessing import build_inference_feature_vector
+from ml.preprocessing import build_inference_feature_vector, normalize_street_name
 
 
 def _tier_from_score(score_100: int) -> RiskTier:
@@ -205,11 +205,17 @@ def _infer_model_probability(
     request: RiskRequest,
     weather_condition: str | None,
     query_time: datetime,
-) -> tuple[float | None, float | None]:
+) -> tuple[float | None, float | None, bool | None]:
     """Return model probability and threshold when model artifacts are available."""
     bundle = _load_model_bundle()
     if bundle is None:
-        return None, None
+        return None, None, None
+
+    road_feature_matched: bool | None = None
+    if request.road_name:
+        normalized_road_name = normalize_street_name(request.road_name)
+        street_rate_map = bundle["street_crash_rate_map"]
+        road_feature_matched = normalized_road_name in street_rate_map
 
     row = _build_inference_row(
         request=request,
@@ -227,7 +233,7 @@ def _infer_model_probability(
     with torch.no_grad():
         logits = model(tensor).squeeze(-1)
         probability = float(torch.sigmoid(logits).item())
-    return probability, float(bundle["threshold"])
+    return probability, float(bundle["threshold"]), road_feature_matched
 
 
 def get_model_runtime_metadata() -> dict[str, str | int | float | bool]:
@@ -283,7 +289,7 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
     warnings.extend(component_warnings)
 
     heuristic_score = _score_from_components(components)
-    model_score, model_threshold = _infer_model_probability(
+    model_score, model_threshold, road_feature_matched = _infer_model_probability(
         request=request,
         weather_condition=weather_condition,
         query_time=query_time,
@@ -292,6 +298,10 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
     risk_score = heuristic_score
     if model_score is not None:
         risk_score = model_score
+        if road_feature_matched is False:
+            warnings.append(
+                "Road name not found in trained street keys; model used global street prior."
+            )
         if model_threshold is not None and model_score >= model_threshold:
             warnings.append(
                 f"Model threshold alert: probability {model_score:.2f} exceeds "
