@@ -77,6 +77,14 @@ class Settings(BaseSettings):
             return "/api/v1"
         return value
 
+    @field_validator("cors_origins_csv", mode="before")
+    @classmethod
+    def parse_cors_origins_csv(cls, value: Any) -> Any:
+        """Allow empty env values for CORS origins by falling back to localhost."""
+        if value == "":
+            return "http://localhost:5173,http://localhost:3000"
+        return value
+
     @field_validator("weather_timeout_seconds", mode="before")
     @classmethod
     def parse_weather_timeout_seconds(cls, value: Any) -> Any:
