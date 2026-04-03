@@ -95,7 +95,7 @@ async def http_exception_handler(
         404: "NOT_FOUND",
         429: "RATE_LIMITED",
     }
-    error_code = code_map.get(exc.status_code, "INTERAL_ERROR")
+    error_code = code_map.get(exc.status_code, "INTERNAL_ERROR")
     message = (
         "Internal server error."
         if exc.status_code >= 500
@@ -116,7 +116,7 @@ async def unhandled_exception_handler(
     return JSONResponse(
         status_code=500,
         content=_error_payload(
-            code="INTERAL_ERROR",
+            code="INTERNAL_ERROR",
             message="Internal server error.",
         ),
     )

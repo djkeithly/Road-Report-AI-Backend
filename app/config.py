@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         """Return normalized CORS origins from comma-separated configuration."""
-        origins = [value.strip() for value in self.cors_origins_csv.split(",")]
+        origins = [value.strip().rstrip("/") for value in self.cors_origins_csv.split(",")]
         return [origin for origin in origins if origin]
 
     @field_validator("debug", mode="before")

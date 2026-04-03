@@ -24,11 +24,18 @@ Important keys:
 - `DATABASE_URL`
 - `API_V1_PREFIX`
 - `DEBUG`
+- `CORS_ORIGINS_CSV`
 - `WEATHER_API_BASE_URL`
 - `WEATHER_USER_AGENT`
 - `WEATHER_TIMEOUT_SECONDS`
 - `MODEL_FILE_PATH="ml/artifacts/latest-model.pt"`
 - `MODEL_VERSION="baseline-v1"`
+
+Production CORS example:
+
+```env
+CORS_ORIGINS_CSV=https://road-report-ai-frontend.vercel.app,https://www.yourdomain.com
+```
 
 ## 3) Train the Model
 
