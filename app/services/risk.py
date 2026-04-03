@@ -22,7 +22,10 @@ from app.schemas.risk import (
 )
 from app.services.weather import get_fallback_weather_snapshot, get_weather_snapshot
 from ml.model import BaselineCrashRiskModel, load_model_state
-from ml.preprocessing import build_inference_feature_vector, normalize_street_name
+from ml.preprocessing import (
+    build_inference_feature_vector,
+    resolve_street_name_for_lookup,
+)
 
 
 def _tier_from_score(score_100: int) -> RiskTier:
@@ -212,10 +215,13 @@ def _infer_model_probability(
         return None, None, None
 
     road_feature_matched: bool | None = None
+    resolved_street_name: str | None = None
     if request.road_name:
-        normalized_road_name = normalize_street_name(request.road_name)
         street_rate_map = bundle["street_crash_rate_map"]
-        road_feature_matched = normalized_road_name in street_rate_map
+        resolved_street_name, _, road_feature_matched = resolve_street_name_for_lookup(
+            street_name=request.road_name,
+            street_crash_rate_map=street_rate_map,
+        )
 
     row = _build_inference_row(
         request=request,
@@ -227,6 +233,7 @@ def _infer_model_probability(
         feature_columns=bundle["feature_columns"],
         street_crash_rate_map=bundle["street_crash_rate_map"],
         global_street_crash_rate=bundle["global_street_crash_rate"],
+        resolved_street_name=resolved_street_name,
     )
     tensor = torch.from_numpy(np.asarray([vector], dtype=np.float32))
     model = bundle["model"]

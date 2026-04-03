@@ -1,5 +1,6 @@
 """Training-data preprocessing utilities for crash risk modeling."""
 
+import difflib
 import re
 from pathlib import Path
 
@@ -156,6 +157,37 @@ def _normalize_street_name(value: str | int | float | None) -> str:
     return normalize_street_name(value)
 
 
+def resolve_street_name_for_lookup(
+    *,
+    street_name: str | None,
+    street_crash_rate_map: dict[str, float],
+) -> tuple[str, float | None, bool]:
+    """Resolve user street input to the best known training key.
+
+    Resolution strategy:
+    1) normalized exact match
+    2) cardinal-prefix stripped match (for example n floyd rd -> floyd rd)
+    3) conservative fuzzy match with high cutoff
+    """
+    normalized = normalize_street_name(street_name)
+    if normalized in street_crash_rate_map:
+        return normalized, float(street_crash_rate_map[normalized]), True
+
+    tokens = normalized.split()
+    if tokens and tokens[0] in {"n", "s", "e", "w"} and len(tokens) > 1:
+        without_prefix = " ".join(tokens[1:])
+        if without_prefix in street_crash_rate_map:
+            return without_prefix, float(street_crash_rate_map[without_prefix]), True
+
+    candidates = list(street_crash_rate_map.keys())
+    close = difflib.get_close_matches(normalized, candidates, n=1, cutoff=0.92)
+    if close:
+        matched_key = close[0]
+        return matched_key, float(street_crash_rate_map[matched_key]), True
+
+    return normalized, None, False
+
+
 def build_feature_table(*, dataframe: pd.DataFrame) -> dict[str, pd.DataFrame | pd.Series]:
     """Build encoded features and binary labels from normalized training data."""
     shaped = dataframe.copy()
@@ -204,6 +236,7 @@ def build_inference_feature_vector(
     feature_columns: list[str],
     street_crash_rate_map: dict[str, float] | None = None,
     global_street_crash_rate: float | None = None,
+    resolved_street_name: str | None = None,
 ) -> np.ndarray:
     """Encode a single inference row into the trained feature-column order."""
     frame = pd.DataFrame([row])
@@ -217,7 +250,7 @@ def build_inference_feature_vector(
 
     normalized["crashtime_minutes"] = normalized["crashtime"].map(_parse_crash_time_minutes)
     normalized["hour_bucket"] = normalized["hourofday"].map(_parse_hour_bucket)
-    street_name = normalize_street_name(normalized["streetname"].iloc[0])
+    street_name = resolved_street_name or normalize_street_name(normalized["streetname"].iloc[0])
     default_rate = 0.0 if global_street_crash_rate is None else global_street_crash_rate
     if street_crash_rate_map is None:
         street_rate = default_rate
