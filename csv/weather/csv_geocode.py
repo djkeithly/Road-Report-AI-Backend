@@ -1,7 +1,6 @@
 """
 ISD station history: reverse-geocode LAT/LON with the U.S. Census coordinates
-geocoder and write CSV with ``Geocoded_City``, ``Geocoded_County``, and
-``Geocoded_County_Subdivision``.
+geocoder and write CSV with ``Geocoded_City`` and ``Geocoded_County``.
 
 Intended to be imported (e.g. from training pipelines), not run as a script.
 Call ``geocode()`` with optional ``ctry`` / ``state`` filters on ``CTRY`` /
@@ -45,7 +44,7 @@ def census_reverse_geocode_city_county(
 ) -> tuple[str | None, str | None, str | None]:
     """
     Reverse-geocode a US point with the Census Bureau's public geocoder.
-    Returns (city, county, county_subdivision). City is the incorporated place
+    Returns (city, county). City is the incorporated place
     BASENAME when the point lies inside one; otherwise None.
     """
     params = urllib.parse.urlencode(
@@ -79,12 +78,7 @@ def census_reverse_geocode_city_county(
     if places:
         city_name = places[0].get("BASENAME") or places[0].get("NAME")
 
-    subdiv_name = None
-    subdivs = geographies.get("County Subdivisions") or []
-    if subdivs:
-        subdiv_name = subdivs[0].get("NAME")
-
-    return city_name, county_name, subdiv_name
+    return city_name, county_name
 
 
 def add_geocoded_city_county_columns(
@@ -96,15 +90,14 @@ def add_geocoded_city_county_columns(
     timeout_sec: float = 30.0,
 ) -> pd.DataFrame:
     """
-    Add Geocoded_City, Geocoded_County, and Geocoded_County_Subdivision using
+    Add Geocoded_City and Geocoded_County using
     the Census geocoder. Rows with missing latitude or longitude are left blank.
     Duplicate coordinates reuse a small in-memory cache.
     """
     out = df.copy()
     cities: list[str | None] = []
     counties: list[str | None] = []
-    subdivs: list[str | None] = []
-    cache: dict[tuple[float, float], tuple[str | None, str | None, str | None]] = {}
+    cache: dict[tuple[float, float], tuple[str | None, str | None]] = {}
 
     for _, row in out.iterrows():
         lat = _float_lat_lon(row.get(lat_col))
@@ -112,29 +105,26 @@ def add_geocoded_city_county_columns(
         if lat is None or lon is None:
             cities.append(None)
             counties.append(None)
-            subdivs.append(None)
             continue
 
         print(f"Geocoding LAT={lat} LON={lon}...")
 
         key = (round(lat, 6), round(lon, 6))
         if key not in cache:
-            city, county, subdiv = census_reverse_geocode_city_county(
+            city, county = census_reverse_geocode_city_county(
                 lon, lat, timeout_sec=timeout_sec
             )
-            cache[key] = (city, county, subdiv)
+            cache[key] = (city, county )
             if delay_sec > 0:
                 time.sleep(delay_sec)
         else:
-            city, county, subdiv = cache[key]
+            city, county = cache[key]
 
         cities.append(city)
         counties.append(county)
-        subdivs.append(subdiv)
 
     out["Geocoded_City"] = cities
     out["Geocoded_County"] = counties
-    out["Geocoded_County_Subdivision"] = subdivs
     return out
 
 
@@ -163,6 +153,15 @@ def filter_isd_by_country_state(
         return df[df["CTRY"] == ctry].copy()
 
     return df[df["STATE"] == state].copy()
+
+
+def drop_unnecessary_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Drop unnecessary columns from the geocoded dataframe.
+    Removes: ICAO, LAT, LON, ELEV(M), BEGIN, END
+    """
+    cols_to_drop = ["ICAO", "LAT", "LON", "ELEV(M)", "BEGIN", "END"]
+    return df.drop(columns=[col for col in cols_to_drop if col in df.columns])
 
 
 def geocode(
@@ -203,5 +202,9 @@ def geocode(
     enriched = add_geocoded_city_county_columns(
         subset, delay_sec=delay_sec, timeout_sec=timeout_sec
     )
+    
+    enriched = drop_unnecessary_columns(enriched)
     enriched.to_csv(dst_path, index=False)
+
+
     return dst_path

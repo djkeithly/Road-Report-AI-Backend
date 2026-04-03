@@ -1,27 +1,52 @@
 Procure Data for csv_editing.py from: https://cris.dot.state.tx.us/public/Query/app/query-builder/disclaimer
 
+#   #   #   #   #   #   #   #   #   #   #   #
+#               Steps to run                #
+#   #   #   #   #   #   #   #   #   #   #   #
 
+1) Ensure that geocoded.csv exists inside the wether directory. If it does not, scroll to 'Just in case links'
+2) Ensure that the variables in CreateTrainingData.py are correct. Default values are in Variable List
+3) Run:
 
+py csv/CreateTrainingData.py
 
+4) Remember to be patient, while there is logging to notify you of what is happening, notifications can be infrequent. So long as no error message appears or abortion happens, the files should be runing
 
+#   #   #   #   #   #   #   #   #   #   #   #
+#               Variable List               #
+#   #   #   #   #   #   #   #   #   #   #   #
 
+Main file to edit to customize what data is generated is CreateTrainingData.py. No other file should need to be edited
 
+# state = "TX"
+    The State to be looked into
+# ctry = "US"
+    Country. Should always be united states
+# cities = False
+    If weather data should get all the cities in the counties (True) or just counties (False)
+    Should be set to false for reasonable data sizes
+# counties = None
+    Used in devlopent to get pipeline working on small scale that quickly processed
+    Should be set to None
+# years = [ 2020, 2021, 2022, 2023, 2024, 2025]
+    What years the weather should be fetching. Should match up to the years of Crash Data you have provided
 
-
-
+#   #   #   #   #   #   #   #   #   #   #   #
+#               Just In Case                #
+#                   Links                   #
+#   #   #   #   #   #   #   #   #   #   #   #
 
 In the case that isd-history.csv or geocode.csv is missed:
 
 Download isd-history.csv: https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.ncei.noaa.gov/pub/data/noaa/isd-history.csv&ved=2ahUKEwjR-NW6u9CTAxUjmSYFHfWuOH8QFnoECAwQAQ&usg=AOvVaw3K8oxIQwTSdqoixdzTGvA3
 
-Place the file inside csv/weather then run
+Place the file inside csv/weather then run to recreate the file
 
 py csv/CreateTrainingData.py --geocode
 _______________________________________________________________________________________________________
-Procure Data for weather from: https://www.ncei.noaa.gov/access/search/data-search/global-hourly
+**********OLD INFO***************
 
-In order to run the 'csv_editing.py' script, you will need to get your data.csv and weather.csv (names do not matter)
-
+In order to run the 'csv_editing.py' script, you will need to get your data.csv and ensure that it lines up inside csv_editing.py
 # # # # # # # # # # # # # # # # # WARNING
 
 This process will take several minutes
