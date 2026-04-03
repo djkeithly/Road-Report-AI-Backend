@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from app import models  # noqa: F401
 from app.config import get_settings
 from app.database import Base, engine
-from app.api.routes import health, risk
+from app.api.routes import health, reports, risk
 
 settings = get_settings()
 
@@ -43,6 +43,7 @@ app.add_middleware(
 # Routes
 app.include_router(health.router, prefix=settings.api_v1_prefix)
 app.include_router(risk.router, prefix=settings.api_v1_prefix)
+app.include_router(reports.router, prefix=settings.api_v1_prefix)
 
 
 @app.get("/")
