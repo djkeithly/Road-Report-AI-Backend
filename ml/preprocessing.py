@@ -1,5 +1,6 @@
 """Training-data preprocessing utilities for crash risk modeling."""
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -120,7 +121,34 @@ def _normalize_street_name(value: str | int | float | None) -> str:
     if value is None:
         return "unknown"
     text = str(value).strip().lower()
-    return text if text else "unknown"
+    if not text:
+        return "unknown"
+
+    # Collapse punctuation and repeated whitespace to improve lookup stability.
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    token_aliases = {
+        "north": "n",
+        "south": "s",
+        "east": "e",
+        "west": "w",
+        "road": "rd",
+        "street": "st",
+        "avenue": "ave",
+        "boulevard": "blvd",
+        "drive": "dr",
+        "lane": "ln",
+        "parkway": "pkwy",
+        "highway": "hwy",
+        "interstate": "ih",
+        "tollway": "tl",
+        "turnpike": "tpke",
+        "freeway": "fwy",
+    }
+    normalized_tokens = [token_aliases.get(token, token) for token in text.split()]
+    normalized = " ".join(normalized_tokens).strip()
+    return normalized if normalized else "unknown"
 
 
 def build_feature_table(*, dataframe: pd.DataFrame) -> dict[str, pd.DataFrame | pd.Series]:
