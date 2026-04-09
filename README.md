@@ -45,6 +45,7 @@ app/
 | GET | `/` | Root info |
 | GET | `/api/v1/health` | Health check |
 | POST | `/api/v1/risk/predict` | Get crash risk score for coordinates |
+| GET | `/api/v1/weather/forecast` | Get the current weather |
 
 ### Example: Risk Prediction
 

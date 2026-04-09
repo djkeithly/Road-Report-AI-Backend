@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.database import Base, engine
-from app.api.routes import health, risk
+from app.api.routes import health, risk, weather
 
 settings = get_settings()
 
@@ -46,6 +46,7 @@ app.add_middleware(
 # Routes
 app.include_router(health.router, prefix=settings.api_v1_prefix)
 app.include_router(risk.router, prefix=settings.api_v1_prefix)
+app.include_router(weather.router, prefix=settings.api_v1_prefix)
 
 
 @app.get("/")
