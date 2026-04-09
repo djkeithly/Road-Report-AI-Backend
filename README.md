@@ -1,6 +1,6 @@
 # Road Report AI – Backend
 
-Backend API for the Road Report AI crash risk prediction system. Built with FastAPI, PostgreSQL (or SQLite for local dev), and designed to integrate with a PyTorch ML model.
+Backend API for the Road Report AI crash risk prediction system. Built with FastAPI, PostgreSQL (async via asyncpg) or SQLite (async via aiosqlite), SQLAlchemy 2.0, and designed to integrate with a PyTorch ML model.
 
 ## Quick Start
 
@@ -24,9 +24,9 @@ Swagger docs: **http://localhost:8000/docs**
 
 ```
 app/
-├── main.py          # FastAPI app, CORS, routers
-├── config.py        # Settings from .env
-├── database.py      # SQLAlchemy engine & session
+├── main.py          # FastAPI app, lifespan, CORS, routers
+├── config.py        # Settings from .env (supports async DB URLs)
+├── database.py      # Async SQLAlchemy engine & session (asyncpg/aiosqlite)
 ├── api/
 │   ├── deps.py      # Shared dependencies (get_db)
 │   └── routes/
@@ -60,8 +60,10 @@ Create a `.env` file (see `.env.example` if provided):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL connection string | `sqlite:///./test.db` |
+| `DATABASE_URL` | DB connection string (`postgresql://` or `sqlite://`) | `sqlite:///./test.db` |
 | `GOOGLE_MAPS_API_KEY` | Google Maps API key (optional) | - |
+
+For PostgreSQL, use `postgresql://user:pass@host:5432/dbname`; it is converted to `postgresql+asyncpg://` for async. For SQLite, `sqlite:///./test.db` is converted to `sqlite+aiosqlite://`.
 
 ## Next Steps
 

@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     """App settings loaded from .env."""
 
     # Database (use DATABASE_URL in .env for PostgreSQL)
+    # For async: postgresql+asyncpg:// or sqlite+aiosqlite://
     database_url: str = "sqlite:///./test.db"
 
     # API
@@ -24,8 +25,19 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @property
+    def async_database_url(self) -> str:
+        """Return database URL with async driver for SQLAlchemy."""
+        if self.database_url.startswith("postgresql://"):
+            return self.database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if self.database_url.startswith("postgresql+asyncpg://"):
+            return self.database_url
+        if self.database_url.startswith("sqlite"):
+            return self.database_url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+        return self.database_url
+
 
 @lru_cache
 def get_settings() -> Settings:
-    """Cached settings instance."""
+    """Return cached settings instance."""
     return Settings()
