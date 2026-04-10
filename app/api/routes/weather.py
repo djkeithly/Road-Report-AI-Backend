@@ -1,11 +1,20 @@
 """Weather data via Open-Meteo (forecast / current conditions)."""
 
+import asyncio
+from collections import OrderedDict
+import copy
+import time
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+# Global precision for coordinate rounding before external API calls.
+COORDINATE_DECIMAL_PRECISION = 2
+# Cache settings: 10 minutes TTL and a bounded in-memory size.
+CACHE_TTL_SECONDS = 600
+MAX_CACHE_ENTRIES = 200
 
 # Human-readable labels for selected WMO weather_code values (see Open-Meteo docs).
 _WEATHER_CODE_LABELS: dict[int, str] = {
@@ -40,6 +49,51 @@ def _get_road_code_label(weather_code: int, temperature: float | None) -> str:
     return "99 - UNKNOWN"
 
 router = APIRouter(prefix="/weather", tags=["weather"])
+
+_weather_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+_cache_locks: dict[str, asyncio.Lock] = {}
+
+
+def _round_coordinate(value: float) -> float:
+    """Round coordinates using the globally configured precision."""
+    return round(value, COORDINATE_DECIMAL_PRECISION)
+
+
+def _build_cache_key(latitude: float, longitude: float) -> str:
+    """Build stable cache key from rounded coordinates."""
+    return f"{latitude:.{COORDINATE_DECIMAL_PRECISION}f}:{longitude:.{COORDINATE_DECIMAL_PRECISION}f}"
+
+
+def _get_cached_payload(cache_key: str) -> dict[str, Any] | None:
+    """Return cached payload if present and not expired."""
+    entry = _weather_cache.get(cache_key)
+    if entry is None:
+        return None
+
+    expires_at, payload = entry
+    now = time.monotonic()
+    if now >= expires_at:
+        _weather_cache.pop(cache_key, None)
+        return None
+
+    _weather_cache.move_to_end(cache_key)
+    return copy.deepcopy(payload)
+
+
+def _set_cached_payload(cache_key: str, payload: dict[str, Any]) -> None:
+    """Store payload in cache with TTL and enforce max entry cap."""
+    expires_at = time.monotonic() + CACHE_TTL_SECONDS
+    _weather_cache[cache_key] = (expires_at, copy.deepcopy(payload))
+    _weather_cache.move_to_end(cache_key)
+    while len(_weather_cache) > MAX_CACHE_ENTRIES:
+        _weather_cache.popitem(last=False)
+
+
+def _with_cached_flag(payload: dict[str, Any], cached: bool) -> dict[str, Any]:
+    """Return payload with a top-level cached flag."""
+    payload_with_flag = copy.deepcopy(payload)
+    payload_with_flag["cached"] = cached
+    return payload_with_flag
 
 
 def _enrich_current_with_weather_label(payload: dict[str, Any]) -> dict[str, Any]:
@@ -80,26 +134,42 @@ async def get_forecast_current(
 
     Returns temperature, precipitation, WMO weather_code, and a derived `weather` label.
     """
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "current": "temperature_2m,precipitation,weather_code",
-        "timezone": "auto",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(OPEN_METEO_FORECAST_URL, params=params)
-    except httpx.RequestError as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to reach weather service: {e!s}",
-        ) from e
+    rounded_latitude = _round_coordinate(latitude)
+    rounded_longitude = _round_coordinate(longitude)
+    cache_key = _build_cache_key(rounded_latitude, rounded_longitude)
 
-    if response.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Weather service returned {response.status_code}",
-        )
+    cached_payload = _get_cached_payload(cache_key)
+    if cached_payload is not None:
+        return _with_cached_flag(cached_payload, cached=True)
 
-    payload: dict[str, Any] = response.json()
-    return _enrich_current_with_weather_label(payload)
+    lock = _cache_locks.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        cached_payload = _get_cached_payload(cache_key)
+        if cached_payload is not None:
+            return _with_cached_flag(cached_payload, cached=True)
+
+        params = {
+            "latitude": rounded_latitude,
+            "longitude": rounded_longitude,
+            "current": "temperature_2m,precipitation,weather_code",
+            "timezone": "auto",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(OPEN_METEO_FORECAST_URL, params=params)
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to reach weather service: {e!s}",
+            ) from e
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Weather service returned {response.status_code}",
+            )
+
+        payload: dict[str, Any] = response.json()
+        enriched_payload = _enrich_current_with_weather_label(payload)
+        _set_cached_payload(cache_key, enriched_payload)
+        return _with_cached_flag(enriched_payload, cached=False)
