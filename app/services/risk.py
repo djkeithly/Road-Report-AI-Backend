@@ -1,6 +1,8 @@
 """Risk prediction service with weather enrichment and scoring scaffold."""
 
 import json
+import os
+import pickle
 from datetime import UTC, datetime
 from functools import lru_cache
 from math import fabs
@@ -8,8 +10,9 @@ from pathlib import Path
 
 import httpx
 import numpy as np
+import pandas as pd
 import torch
-
+import torch.nn as nn
 from app.config import get_settings
 from app.schemas.risk import (
     RiskComponent,
@@ -21,11 +24,16 @@ from app.schemas.risk import (
     RiskTier,
 )
 from app.services.weather import get_fallback_weather_snapshot, get_weather_snapshot
-from ml.model import BaselineCrashRiskModel, load_model_state
-from ml.preprocessing import (
-    build_inference_feature_vector,
-    resolve_street_name_for_lookup,
-)
+
+
+# 1. Define the Model
+class LogisticRegression(nn.Module):
+    def __init__(self, input_dim):
+        super(LogisticRegression, self).__init__()
+        self.linear = nn.Linear(input_dim, 1)
+
+    def forward(self, x):
+        return self.linear(x)
 
 
 def _tier_from_score(score_100: int) -> RiskTier:
@@ -77,7 +85,9 @@ def _build_components(
             maxPoints=25,
             weight=0.30,
             details=[
-                RiskDetail(label="Road Class", value=requested_value_or_dash(road_class)),
+                RiskDetail(
+                    label="Road Class", value=requested_value_or_dash(road_class)
+                ),
                 RiskDetail(label="Surface Condition", value="Unknown"),
             ],
             source="txdot-cris-estimate",
@@ -101,10 +111,16 @@ def _build_components(
             maxPoints=25,
             weight=0.25,
             details=[
-                RiskDetail(label="Forecast condition", value=weather_condition or "Unavailable"),
+                RiskDetail(
+                    label="Forecast condition", value=weather_condition or "Unavailable"
+                ),
                 RiskDetail(
                     label="Temperature (F)",
-                    value=str(temperature_f) if temperature_f is not None else "Unavailable",
+                    value=(
+                        str(temperature_f)
+                        if temperature_f is not None
+                        else "Unavailable"
+                    ),
                 ),
             ],
             source="weather.gov",
@@ -167,60 +183,145 @@ def _score_from_components(components: RiskComponents) -> float:
 
 @lru_cache(maxsize=1)
 def _load_model_bundle() -> dict[str, object] | None:
-    """Load trained model and metadata used for online inference."""
-    settings = get_settings()
-    model_path = Path(settings.model_file_path)
-    if not model_path.is_absolute():
-        # Resolve relative model paths from backend project root.
+    """Load trained Logistic Regression model, feature columns, and banding cutoffs."""
+    model_path = Path("logistic_regression_model.pth")
+    cols_path = Path("feature_columns.pkl")
+
+    if (
+        not model_path.exists()
+        and (Path(__file__).resolve().parents[2] / model_path).exists()
+    ):
         model_path = Path(__file__).resolve().parents[2] / model_path
-    metadata_path = model_path.with_suffix(".meta.json")
-    if not model_path.exists() or not metadata_path.exists():
+        cols_path = Path(__file__).resolve().parents[2] / cols_path
+
+    if not model_path.exists() or not cols_path.exists():
         return None
 
-    with metadata_path.open("r", encoding="utf-8") as infile:
-        metadata = json.load(infile)
+    # Load the feature columns mapping
+    with open(cols_path, "rb") as f:
+        feature_columns = pickle.load(f)
 
-    input_size = int(metadata["input_size"])
-    feature_columns = list(metadata["feature_columns"])
-    street_crash_rate_map = metadata.get("street_crash_rate_map", {})
-    global_street_crash_rate = float(metadata.get("global_street_crash_rate", 0.0))
-    threshold = float(metadata.get("threshold", 0.5))
-
-    model = BaselineCrashRiskModel(input_size=input_size)
-    model = load_model_state(model, model_path=str(model_path))
+    # Initialize and load the model weights
+    input_dim = len(feature_columns)
+    model = LogisticRegression(input_dim)
+    model.load_state_dict(
+        torch.load(model_path, map_location=torch.device("cpu"), weights_only=True)
+    )
     model.eval()
+
+    # Pre-calculate banding cutoffs using the reference dataset
+    banding_dataset = [
+        {
+            "City": ["DALLAS"],
+            "County": ["DALLAS"],
+            "Crash Month": ["1"],
+            "Crash Time": ["0"],
+            "Rural Urban Type": ["LARGE URBANIZED (200,000+)"],
+            "Street Name": ["S I 35E S"],
+            "Surface Condition": ["1 - DRY"],
+            "Weather Condition": ["1 - CLEAR"],
+        },
+        {
+            "City": ["DALLAS"],
+            "County": ["DALLAS"],
+            "Crash Month": ["1"],
+            "Crash Time": ["0"],
+            "Rural Urban Type": ["No Data"],
+            "Street Name": ["S I 35E S"],
+            "Surface Condition": ["1 - DRY"],
+            "Weather Condition": ["1 - CLEAR"],
+        },
+        {
+            "City": ["DALLAS"],
+            "County": ["DALLAS"],
+            "Crash Month": ["1"],
+            "Crash Time": ["0"],
+            "Rural Urban Type": ["No Data"],
+            "Street Name": ["S I 35E S"],
+            "Surface Condition": ["2 - WET"],
+            "Weather Condition": ["3 - RAIN"],
+        },
+    ]
+
+    banding_cutoffs = []
+    for band_item in banding_dataset:
+        custom_df = pd.DataFrame(band_item)
+        custom_encoded = pd.get_dummies(custom_df)
+        custom_aligned = custom_encoded.reindex(columns=feature_columns, fill_value=0)
+        custom_tensor = torch.tensor(custom_aligned.to_numpy(dtype=np.float32))
+
+        with torch.no_grad():
+            prob = torch.sigmoid(model(custom_tensor)).item()
+            banding_cutoffs.append(prob)
 
     return {
         "model": model,
         "feature_columns": feature_columns,
-        "street_crash_rate_map": street_crash_rate_map,
-        "global_street_crash_rate": global_street_crash_rate,
-        "threshold": threshold,
+        "banding_cutoffs": banding_cutoffs,
     }
 
 
-def _build_inference_row(
+async def _get_city_from_coords(lat: float, lon: float) -> str:
+    """Reverse geocode coordinates to find the city using OpenStreetMap Nominatim."""
+    url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=10"
+    try:
+        async with httpx.AsyncClient(
+            headers={"User-Agent": "CrashRiskApp/1.0"}
+        ) as client:
+            response = await client.get(url, timeout=5.0)
+            if response.status_code == 200:
+                data = response.json()
+                address = data.get("address", {})
+                city = (
+                    address.get("city") or address.get("town") or address.get("village")
+                )
+                if city:
+                    return city.upper()
+    except Exception:
+        pass
+
+    return "UNKNOWN"
+
+
+def _build_inference_df(
     *,
     request: RiskRequest,
     weather_condition: str | None,
     query_time: datetime,
-) -> dict[str, str | int]:
-    """Build a single-row feature payload compatible with training preprocessing."""
-    hour_text = f"{query_time.hour:02d}:00 - {query_time.hour:02d}:59"
-    return {
-        "city": "Unknown",
-        "county": "Unknown",
-        "crashmonth": query_time.month,
-        "crashtime": f"{query_time.hour:02d}:{query_time.minute:02d}",
-        "crashyear": query_time.year,
-        "dayofweek": query_time.strftime("%A").upper(),
-        "hourofday": hour_text,
-        "roadclass": requested_value_or_dash(request.road_class),
-        "ruralurbantype": "Unknown",
-        "streetname": requested_value_or_dash(request.road_name),
-        "surfacecondition": "Unknown",
-        "weathercondition": weather_condition or "Unknown",
+    city: str,
+) -> pd.DataFrame:
+    """Build a single-row Pandas DataFrame compatible with dummy encoding."""
+    weather_upper = (weather_condition or "CLEAR").upper()
+    if "RAIN" in weather_upper or "STORM" in weather_upper:
+        w_cond = "3 - RAIN"
+        s_cond = "2 - WET"
+    elif "SNOW" in weather_upper or "ICE" in weather_upper:
+        w_cond = "4 - SNOW"
+        s_cond = "3 - ICE"
+    else:
+        w_cond = "1 - CLEAR"
+        s_cond = "1 - DRY"
+
+    crash_time_formatted = str(query_time.hour * 100)
+    crash_month_formatted = str(query_time.month)
+
+    segment_text = (request.segment or "").lower()
+    if "downtown" in segment_text:
+        rural_urban_type = "LARGE URBANIZED (200,000+)"
+    else:
+        rural_urban_type = "No Data"
+
+    row = {
+        "City": [city],
+        "County": ["DALLAS"],
+        "Crash Month": [crash_month_formatted],
+        "Crash Time": [crash_time_formatted],
+        "Rural Urban Type": [rural_urban_type],
+        "Street Name": [request.road_name.upper() if request.road_name else "UNKNOWN"],
+        "Surface Condition": [s_cond],
+        "Weather Condition": [w_cond],
     }
+    return pd.DataFrame(row)
 
 
 def _infer_model_probability(
@@ -228,85 +329,71 @@ def _infer_model_probability(
     request: RiskRequest,
     weather_condition: str | None,
     query_time: datetime,
-) -> tuple[float | None, float | None, bool | None]:
-    """Return model probability and threshold when model artifacts are available."""
+    city: str,
+) -> tuple[float | None, list[float] | None]:
+    """Return model probability and dynamically calculated banding cutoffs."""
     bundle = _load_model_bundle()
     if bundle is None:
-        return None, None, None
+        return None, None
 
-    road_feature_matched: bool | None = None
-    resolved_street_name: str | None = None
-    if request.road_name:
-        street_rate_map = bundle["street_crash_rate_map"]
-        resolved_street_name, _, road_feature_matched = resolve_street_name_for_lookup(
-            street_name=request.road_name,
-            street_crash_rate_map=street_rate_map,
-        )
-
-    row = _build_inference_row(
+    df = _build_inference_df(
         request=request,
         weather_condition=weather_condition,
         query_time=query_time,
+        city=city,
     )
-    vector = build_inference_feature_vector(
-        row=row,
-        feature_columns=bundle["feature_columns"],
-        street_crash_rate_map=bundle["street_crash_rate_map"],
-        global_street_crash_rate=bundle["global_street_crash_rate"],
-        resolved_street_name=resolved_street_name,
-    )
-    tensor = torch.from_numpy(np.asarray([vector], dtype=np.float32))
+
+    encoded = pd.get_dummies(df)
+    aligned = encoded.reindex(columns=bundle["feature_columns"], fill_value=0)
+    tensor = torch.tensor(aligned.to_numpy(dtype=np.float32))
+
     model = bundle["model"]
     with torch.no_grad():
-        logits = model(tensor).squeeze(-1)
-        probability = float(torch.sigmoid(logits).item())
-    return probability, float(bundle["threshold"]), road_feature_matched
+        probability = torch.sigmoid(model(tensor)).item()
+
+    return probability, bundle["banding_cutoffs"]
 
 
 def get_model_runtime_metadata() -> dict[str, str | int | float | bool]:
     """Return model artifact metadata for runtime diagnostics and UI display."""
-    settings = get_settings()
-    model_path = Path(settings.model_file_path)
-    if not model_path.is_absolute():
+    model_path = Path("logistic_regression_model.pth")
+    if (
+        not model_path.exists()
+        and (Path(__file__).resolve().parents[2] / model_path).exists()
+    ):
         model_path = Path(__file__).resolve().parents[2] / model_path
-    metadata_path = model_path.with_suffix(".meta.json")
-    if not model_path.exists() or not metadata_path.exists():
+
+    if not model_path.exists():
         return {
             "available": False,
             "model_path": str(model_path),
-            "message": "Model artifact or metadata not found.",
+            "message": "Logistic Regression model artifact not found.",
         }
-
-    with metadata_path.open("r", encoding="utf-8") as infile:
-        metadata = json.load(infile)
 
     return {
         "available": True,
         "model_path": str(model_path),
-        "input_size": int(metadata.get("input_size", 0)),
-        "rows_used": int(metadata.get("rows_used", 0)),
-        "threshold": float(metadata.get("threshold", 0.5)),
-        "accuracy": float(metadata.get("accuracy", 0.0)),
-        "precision": float(metadata.get("precision", 0.0)),
-        "recall": float(metadata.get("recall", 0.0)),
-        "f1": float(metadata.get("f1", 0.0)),
+        "message": "Using PyTorch Logistic Regression model",
     }
 
 
 async def predict_risk(request: RiskRequest) -> RiskResponse:
-    """Predict crash risk for a location with a deterministic scoring scaffold."""
-    settings = get_settings()
-
+    """Predict crash risk for a location using banded Logistic Regression."""
     warnings: list[str] = []
     weather = get_fallback_weather_snapshot()
     try:
         weather = await get_weather_snapshot(request.latitude, request.longitude)
     except (httpx.HTTPError, KeyError, ValueError):
-        warnings.append("Live weather source unavailable; using fallback environmental data.")
+        warnings.append(
+            "Live weather source unavailable; using fallback environmental data."
+        )
 
     query_time = request.query_time_iso or datetime.now(tz=UTC)
     weather_condition = request.weather_condition or weather.short_forecast
-    inferred_road_class = request.road_class or _infer_road_class_from_name(request.road_name)
+    inferred_road_class = request.road_class or _infer_road_class_from_name(
+        request.road_name
+    )
+
     components, component_warnings = _build_components(
         latitude=request.latitude,
         longitude=request.longitude,
@@ -316,38 +403,49 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
     )
     warnings.extend(component_warnings)
 
+    city = await _get_city_from_coords(request.latitude, request.longitude)
     heuristic_score = _score_from_components(components)
-    model_score, model_threshold, road_feature_matched = _infer_model_probability(
+    model_prob, cutoffs = _infer_model_probability(
         request=request,
         weather_condition=weather_condition,
         query_time=query_time,
+        city=city,
     )
 
-    risk_score = heuristic_score
-    if model_score is not None:
-        if road_feature_matched is False:
-            warnings.append(
-                "Road name not found in trained street keys; model used global street prior."
-            )
-        has_live_weather = weather.source == "weather.gov" and weather.short_forecast is not None
-        confidence = 0.55
-        if road_feature_matched is True:
-            confidence += 0.20
-        if has_live_weather:
-            confidence += 0.15
-        confidence = max(0.35, min(0.90, confidence))
-        risk_score = (confidence * model_score) + ((1.0 - confidence) * heuristic_score)
-        if model_threshold is not None and model_score >= model_threshold:
-            warnings.append(
-                f"Model threshold alert: probability {model_score:.2f} exceeds "
-                f"threshold {model_threshold:.2f}."
-            )
+    if model_prob is not None and cutoffs is not None:
+        c0, c1, c2 = cutoffs[0], cutoffs[1], cutoffs[2]
+
+        # Piecewise interpolation to guarantee score ranges per band
+        if model_prob <= c0:
+            band_index = 0
+            # Scale probability to 0.00 - 0.09 (Single digits)
+            risk_score = (model_prob / max(1e-6, c0)) * 0.09
+
+        elif model_prob <= c1:
+            band_index = 1
+            # Scale probability to 0.10 - 0.49
+            risk_score = 0.10 + ((model_prob - c0) / max(1e-6, c1 - c0)) * 0.39
+
+        elif model_prob <= c2:
+            band_index = 2
+            # Scale probability to 0.50 - 0.89
+            risk_score = 0.50 + ((model_prob - c1) / max(1e-6, c2 - c1)) * 0.39
+
+        else:
+            band_index = 3
+            # Scale probability to 0.90 - 1.00 (Above 90)
+            risk_score = 0.90 + ((model_prob - c2) / max(1e-6, 1.0 - c2)) * 0.10
+
+        risk_score = max(0.0, min(1.0, risk_score))
+
         warnings.append(
-            f"Blended score uses {int(round(confidence * 100))}% model confidence "
-            "and context fallback weighting."
+            f"Logistic Regression Probability: {model_prob:.4f} (Band {band_index})."
         )
     else:
-        warnings.append("Model artifact unavailable; using deterministic fallback scoring.")
+        warnings.append(
+            "Model artifact unavailable; using deterministic fallback scoring."
+        )
+        risk_score = heuristic_score
 
     score_100 = int(round(risk_score * 100))
     tier = _tier_from_score(score_100)
@@ -356,7 +454,7 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
     segment = request.segment or "Segment details unavailable"
 
     summary = (
-        f"Model {settings.model_version} estimates a {score_100}% crash risk profile for "
+        f"Logistic Regression model estimates a {score_100}% crash risk profile for "
         f"the selected location."
     )
     advice = (
