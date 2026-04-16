@@ -1,74 +1,123 @@
-# Road Report AI – Backend
+# Road Report AI - Backend
 
-Backend API for the Road Report AI crash risk prediction system. Built with FastAPI, PostgreSQL (async via asyncpg) or SQLite (async via aiosqlite), SQLAlchemy 2.0, and designed to integrate with a PyTorch ML model.
+Backend API for crash risk prediction with FastAPI, SQLAlchemy async, and a PyTorch model pipeline.
 
-## Quick Start
+## 1) Setup and Run (Windows)
 
 ```bash
-# Create and activate venv (Windows)
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-
-# Install dependencies
+# Recommended Python version: 3.13
+py -3.13 -m venv venv313
+.\venv313\Scripts\Activate.ps1
 pip install -r requirements.txt
-
-# Run the API
 python main.py
-# or: uvicorn app.main:app --reload
 ```
 
-API runs at **http://localhost:8000**  
-Swagger docs: **http://localhost:8000/docs**
+App URLs:
+- API: `http://localhost:8000`
+- Swagger: `http://localhost:8000/docs`
 
-## Project Structure
+## 2) Environment File
 
+Copy `.env.example` to `.env` and set values as needed.
+
+Important keys:
+- `DATABASE_URL`
+- `API_V1_PREFIX`
+- `DEBUG`
+- `CORS_ORIGINS_CSV`
+- `WEATHER_API_BASE_URL`
+- `WEATHER_USER_AGENT`
+- `WEATHER_TIMEOUT_SECONDS`
+- `MODEL_FILE_PATH="ml/artifacts/latest-model.pt"`
+- `MODEL_VERSION="baseline-v1"`
+
+Production CORS example:
+
+```env
+CORS_ORIGINS_CSV=https://road-report-ai-frontend.vercel.app,https://www.yourdomain.com
 ```
-app/
-├── main.py          # FastAPI app, lifespan, CORS, routers
-├── config.py        # Settings from .env (supports async DB URLs)
-├── database.py      # Async SQLAlchemy engine & session (asyncpg/aiosqlite)
-├── api/
-│   ├── deps.py      # Shared dependencies (get_db)
-│   └── routes/
-│       ├── health.py
-│       └── risk.py  # Risk prediction endpoint
-├── schemas/         # Pydantic request/response models
-│   └── risk.py
-└── services/        # Business logic
-    └── risk.py      # TODO: wire to PyTorch model
-```
 
-## API Endpoints
+## 3) Train the Model
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/` | Root info |
-| GET | `/api/v1/health` | Health check |
-| POST | `/api/v1/risk/predict` | Get crash risk score for coordinates |
-| GET | `/api/v1/weather/forecast` | Get the current weather |
-
-### Example: Risk Prediction
+If `csv/TrainingData.csv` exists, train and export model artifacts:
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/risk/predict" \
-  -H "Content-Type: application/json" \
-  -d '{"latitude": 30.2672, "longitude": -97.7431}'
+.\venv313\Scripts\python -m ml.training --csv-path csv/TrainingData.csv --output-path ml/artifacts/latest-model.pt --row-limit 250000 --epochs 8 --batch-size 512
 ```
 
-## Environment Variables
+Optional evaluation report:
 
-Create a `.env` file (see `.env.example` if provided):
+```bash
+.\venv313\Scripts\python -m ml.evaluate --csv-path csv/TrainingData.csv --output-path ml/artifacts/latest-model.pt --row-limit 250000 --epochs 8 --batch-size 512
+```
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATABASE_URL` | DB connection string (`postgresql://` or `sqlite://`) | `sqlite:///./test.db` |
-| `GOOGLE_MAPS_API_KEY` | Google Maps API key (optional) | - |
+## 4) Test with Swagger
 
-For PostgreSQL, use `postgresql://user:pass@host:5432/dbname`; it is converted to `postgresql+asyncpg://` for async. For SQLite, `sqlite:///./test.db` is converted to `sqlite+aiosqlite://`.
+1. Start backend with `python main.py`
+2. Open `http://localhost:8000/docs`
+3. Test these endpoints:
+   - `GET /api/v1/health`
+   - `GET /api/v1/health/model`
+   - `GET /api/v1/risk/model-metrics`
+   - `POST /api/v1/risk/predict`
 
-## Next Steps
+### Swagger request example (likely lower risk)
 
-1. **Database models** – Add SQLAlchemy models in `app/models/` when you need to persist data (e.g. predictions, road segments).
-2. **AI model** – Replace the placeholder in `app/services/risk.py` with your PyTorch model inference.
-3. **Auth** – Add OAuth when ready (e.g. FastAPI OAuth2, Auth0).
-4. **More inputs** – Extend `RiskRequest` in `app/schemas/risk.py` with fields like `road_type`, `time_of_day`, `weather_condition` as your model needs them.
+Use in `POST /api/v1/risk/predict`:
+
+```json
+{
+  "latitude": 32.7767,
+  "longitude": -96.7970,
+  "road_name": "Main St",
+  "segment": "Dallas city center",
+  "road_class": "CITY STREET",
+  "weather_condition": "1 - CLEAR"
+}
+```
+
+### Swagger request example (likely higher risk)
+
+```json
+{
+  "latitude": 32.7767,
+  "longitude": -96.7970,
+  "road_name": "I-35E",
+  "segment": "Downtown Dallas",
+  "road_class": "INTERSTATE",
+  "weather_condition": "3 - RAIN"
+}
+```
+
+## 5) API Endpoints
+
+| Method | Endpoint |
+|---|---|
+| GET | `/` |
+| GET | `/api/v1/health` |
+| GET | `/api/v1/health/model` |
+| GET | `/api/v1/risk/model-metrics` |
+| POST | `/api/v1/risk/predict` |
+
+## 6) Render Deployment (Model-prototype)
+
+- Deploy from branch: `Model-prototype`
+- Build command: `pip install -r requirements.txt`
+- Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+
+Required env variables for production:
+
+```env
+API_V1_PREFIX=/api/v1
+DEBUG=false
+CORS_ORIGINS_CSV=https://road-report-ai-frontend.vercel.app
+MODEL_FILE_PATH=ml/artifacts/latest-model.pt
+MODEL_VERSION=baseline-v1
+WEATHER_API_BASE_URL=https://api.weather.gov
+WEATHER_USER_AGENT=(roadreportai.prod, your-email@example.com)
+WEATHER_TIMEOUT_SECONDS=6.0
+```
+
+Notes:
+- Do not wrap `MODEL_FILE_PATH` in quotes in Render env vars.
+- `WEATHER_USER_AGENT` should include app identifier and contact (email is fine).

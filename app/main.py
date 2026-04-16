@@ -2,12 +2,15 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
+from app import models  # noqa: F401
 from app.config import get_settings
 from app.database import Base, engine
-from app.api.routes import health, risk, weather
+from app.api.routes import health, reports, risk, weather
 
 settings = get_settings()
 
@@ -31,13 +34,7 @@ app = FastAPI(
 # CORS for Vue.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-    ],
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,6 +43,7 @@ app.add_middleware(
 # Routes
 app.include_router(health.router, prefix=settings.api_v1_prefix)
 app.include_router(risk.router, prefix=settings.api_v1_prefix)
+app.include_router(reports.router, prefix=settings.api_v1_prefix)
 app.include_router(weather.router, prefix=settings.api_v1_prefix)
 
 
@@ -57,3 +55,70 @@ def root() -> dict[str, str]:
         "docs": "/docs",
         "api": settings.api_v1_prefix,
     }
+
+
+def _error_payload(
+    *,
+    code: str,
+    message: str,
+    details: dict | list | str | None = None,
+) -> dict[str, dict[str, str | dict | list]]:
+    """Return standard SSoT error envelope."""
+    error: dict[str, str | dict | list] = {"code": code, "message": message}
+    if details is not None:
+        error["details"] = details
+    return {"error": error}
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    """Return standardized validation error envelope."""
+    return JSONResponse(
+        status_code=422,
+        content=_error_payload(
+            code="VALIDATION_ERROR",
+            message="Request validation failed.",
+            details=exc.errors(),
+        ),
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(
+    request: Request,
+    exc: HTTPException,
+) -> JSONResponse:
+    """Return standardized HTTP error envelope."""
+    code_map = {
+        401: "UNAUTHORIZED",
+        404: "NOT_FOUND",
+        429: "RATE_LIMITED",
+    }
+    error_code = code_map.get(exc.status_code, "INTERNAL_ERROR")
+    message = (
+        "Internal server error."
+        if exc.status_code >= 500
+        else str(exc.detail or "Request failed.")
+    )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_error_payload(code=error_code, message=message),
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(
+    request: Request,
+    exc: Exception,
+) -> JSONResponse:
+    """Return standardized internal error envelope for uncaught exceptions."""
+    return JSONResponse(
+        status_code=500,
+        content=_error_payload(
+            code="INTERNAL_ERROR",
+            message="Internal server error.",
+        ),
+    )

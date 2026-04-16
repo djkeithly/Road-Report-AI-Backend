@@ -1,8 +1,19 @@
 .env
 venv/
+venv313/
+.venv/
 test.db
+*.db
 __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+*.pyd
+.mypy_cache/
+.ruff_cache/
+.idea/
+.DS_Store
 *.csv
+
+# Keep generated training data and local model artifacts out of git
+csv/TrainingData.csv
