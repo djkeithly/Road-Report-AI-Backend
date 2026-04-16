@@ -183,9 +183,13 @@ def _score_from_components(components: RiskComponents) -> float:
 
 @lru_cache(maxsize=1)
 def _load_model_bundle() -> dict[str, object] | None:
-    """Load trained Logistic Regression model, feature columns, and banding cutoffs."""
-    model_path = Path("logistic_regression_model.pth")
-    cols_path = Path("feature_columns.pkl")
+    """Load trained Logistic Regression model and feature columns."""
+    model_path = Path(
+        "/home/bob/Programming/road-report/Road-Report-AI-Backend/app/services/logistic_regression_model.pth"
+    )
+    cols_path = Path(
+        "/home/bob/Programming/road-report/Road-Report-AI-Backend/app/services/feature_columns.pkl"
+    )
 
     if (
         not model_path.exists()
@@ -209,55 +213,9 @@ def _load_model_bundle() -> dict[str, object] | None:
     )
     model.eval()
 
-    # Pre-calculate banding cutoffs using the reference dataset
-    banding_dataset = [
-        {
-            "City": ["DALLAS"],
-            "County": ["DALLAS"],
-            "Crash Month": ["1"],
-            "Crash Time": ["0"],
-            "Rural Urban Type": ["LARGE URBANIZED (200,000+)"],
-            "Street Name": ["S I 35E S"],
-            "Surface Condition": ["1 - DRY"],
-            "Weather Condition": ["1 - CLEAR"],
-        },
-        {
-            "City": ["DALLAS"],
-            "County": ["DALLAS"],
-            "Crash Month": ["1"],
-            "Crash Time": ["0"],
-            "Rural Urban Type": ["No Data"],
-            "Street Name": ["S I 35E S"],
-            "Surface Condition": ["1 - DRY"],
-            "Weather Condition": ["1 - CLEAR"],
-        },
-        {
-            "City": ["DALLAS"],
-            "County": ["DALLAS"],
-            "Crash Month": ["1"],
-            "Crash Time": ["0"],
-            "Rural Urban Type": ["No Data"],
-            "Street Name": ["S I 35E S"],
-            "Surface Condition": ["2 - WET"],
-            "Weather Condition": ["3 - RAIN"],
-        },
-    ]
-
-    banding_cutoffs = []
-    for band_item in banding_dataset:
-        custom_df = pd.DataFrame(band_item)
-        custom_encoded = pd.get_dummies(custom_df)
-        custom_aligned = custom_encoded.reindex(columns=feature_columns, fill_value=0)
-        custom_tensor = torch.tensor(custom_aligned.to_numpy(dtype=np.float32))
-
-        with torch.no_grad():
-            prob = torch.sigmoid(model(custom_tensor)).item()
-            banding_cutoffs.append(prob)
-
     return {
         "model": model,
         "feature_columns": feature_columns,
-        "banding_cutoffs": banding_cutoffs,
     }
 
 
@@ -289,6 +247,7 @@ def _build_inference_df(
     weather_condition: str | None,
     query_time: datetime,
     city: str,
+    road_class: str | None,
 ) -> pd.DataFrame:
     """Build a single-row Pandas DataFrame compatible with dummy encoding."""
     weather_upper = (weather_condition or "CLEAR").upper()
@@ -302,21 +261,16 @@ def _build_inference_df(
         w_cond = "1 - CLEAR"
         s_cond = "1 - DRY"
 
-    crash_time_formatted = str(query_time.hour * 100)
-    crash_month_formatted = str(query_time.month)
-
-    segment_text = (request.segment or "").lower()
-    if "downtown" in segment_text:
-        rural_urban_type = "LARGE URBANIZED (200,000+)"
-    else:
-        rural_urban_type = "No Data"
+    # Match integer format exactly
+    crash_time_int = int((query_time.hour * 100) + query_time.minute)
+    crash_month_int = int(query_time.month)
 
     row = {
         "City": [city],
         "County": ["DALLAS"],
-        "Crash Month": [crash_month_formatted],
-        "Crash Time": [crash_time_formatted],
-        "Rural Urban Type": [rural_urban_type],
+        "Crash Month": [crash_month_int],
+        "Crash Time": [crash_time_int],
+        "Road Class": [road_class.upper() if road_class else "UNKNOWN"],
         "Street Name": [request.road_name.upper() if request.road_name else "UNKNOWN"],
         "Surface Condition": [s_cond],
         "Weather Condition": [w_cond],
@@ -330,33 +284,96 @@ def _infer_model_probability(
     weather_condition: str | None,
     query_time: datetime,
     city: str,
-) -> tuple[float | None, list[float] | None]:
-    """Return model probability and dynamically calculated banding cutoffs."""
+    road_class: str | None,
+) -> tuple[float | None, float | None, float | None]:
+    """Return model probability, along with dynamic min and max bounds for the current context."""
     bundle = _load_model_bundle()
     if bundle is None:
-        return None, None
+        return None, None, None
 
+    model = bundle["model"]
+    feature_columns = bundle["feature_columns"]
+
+    # 1. Get Live Probability
     df = _build_inference_df(
         request=request,
         weather_condition=weather_condition,
         query_time=query_time,
         city=city,
+        road_class=road_class,
     )
 
     encoded = pd.get_dummies(df)
-    aligned = encoded.reindex(columns=bundle["feature_columns"], fill_value=0)
+    aligned = encoded.reindex(columns=feature_columns, fill_value=0)
     tensor = torch.tensor(aligned.to_numpy(dtype=np.float32))
 
-    model = bundle["model"]
     with torch.no_grad():
-        probability = torch.sigmoid(model(tensor)).item()
+        probability = float(torch.sigmoid(model(tensor)).item())
 
-    return probability, bundle["banding_cutoffs"]
+    # 2. Dynamically calculate bounds using LIVE time, month, and city
+    crash_time_int = int((query_time.hour * 100) + query_time.minute)
+    crash_month_int = int(query_time.month)
+    street_name = request.road_name.upper() if request.road_name else "UNKNOWN"
+
+    banding_dataset = [
+        {
+            "City": [city],
+            "County": ["DALLAS"],
+            "Crash Month": [crash_month_int],
+            "Crash Time": [crash_time_int],
+            "Road Class": ["CITY STREET"],
+            "Street Name": [street_name],
+            "Surface Condition": ["1 - DRY"],
+            "Weather Condition": ["1 - CLEAR"],
+        },
+        {
+            "City": [city],
+            "County": ["DALLAS"],
+            "Crash Month": [crash_month_int],
+            "Crash Time": [crash_time_int],
+            "Road Class": ["INTERSTATE"],
+            "Street Name": [street_name],
+            "Surface Condition": ["1 - DRY"],
+            "Weather Condition": ["1 - CLEAR"],
+        },
+        {
+            "City": [city],
+            "County": ["DALLAS"],
+            "Crash Month": [crash_month_int],
+            "Crash Time": [crash_time_int],
+            "Road Class": ["INTERSTATE"],
+            "Street Name": [street_name],
+            "Surface Condition": ["2 - WET"],
+            "Weather Condition": ["3 - RAIN"],
+        },
+    ]
+
+    cutoffs = []
+    for band_item in banding_dataset:
+        custom_df = pd.DataFrame(band_item)
+        custom_encoded = pd.get_dummies(custom_df)
+        custom_aligned = custom_encoded.reindex(columns=feature_columns, fill_value=0)
+        custom_tensor = torch.tensor(custom_aligned.to_numpy(dtype=np.float32))
+
+        with torch.no_grad():
+            prob = float(torch.sigmoid(model(custom_tensor)).item())
+            cutoffs.append(prob)
+
+    min_bound = min(cutoffs)
+    max_bound = max(cutoffs)
+
+    # Ensure probability is always within the known bounds
+    min_bound = min(min_bound, probability)
+    max_bound = max(max_bound, probability)
+
+    return probability, min_bound, max_bound
 
 
 def get_model_runtime_metadata() -> dict[str, str | int | float | bool]:
     """Return model artifact metadata for runtime diagnostics and UI display."""
-    model_path = Path("logistic_regression_model.pth")
+    model_path = Path(
+        "/home/bob/Programming/road-report/Road-Report-AI-Backend/app/services/logistic_regression_model.pth"
+    )
     if (
         not model_path.exists()
         and (Path(__file__).resolve().parents[2] / model_path).exists()
@@ -378,7 +395,7 @@ def get_model_runtime_metadata() -> dict[str, str | int | float | bool]:
 
 
 async def predict_risk(request: RiskRequest) -> RiskResponse:
-    """Predict crash risk for a location using banded Logistic Regression."""
+    """Predict crash risk using Inverted Min-Max Normalized Logistic Regression."""
     warnings: list[str] = []
     weather = get_fallback_weather_snapshot()
     try:
@@ -405,41 +422,39 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
 
     city = await _get_city_from_coords(request.latitude, request.longitude)
     heuristic_score = _score_from_components(components)
-    model_prob, cutoffs = _infer_model_probability(
+
+    model_prob, min_bound, max_bound = _infer_model_probability(
         request=request,
         weather_condition=weather_condition,
         query_time=query_time,
         city=city,
+        road_class=inferred_road_class,
     )
 
-    if model_prob is not None and cutoffs is not None:
-        c0, c1, c2 = cutoffs[0], cutoffs[1], cutoffs[2]
-
-        # Piecewise interpolation to guarantee score ranges per band
-        if model_prob <= c0:
-            band_index = 0
-            # Scale probability to 0.00 - 0.09 (Single digits)
-            risk_score = (model_prob / max(1e-6, c0)) * 0.09
-
-        elif model_prob <= c1:
-            band_index = 1
-            # Scale probability to 0.10 - 0.49
-            risk_score = 0.10 + ((model_prob - c0) / max(1e-6, c1 - c0)) * 0.39
-
-        elif model_prob <= c2:
-            band_index = 2
-            # Scale probability to 0.50 - 0.89
-            risk_score = 0.50 + ((model_prob - c1) / max(1e-6, c2 - c1)) * 0.39
-
+    if model_prob is not None and min_bound is not None and max_bound is not None:
+        if max_bound - min_bound < 1e-6:
+            padding = 0.05
         else:
-            band_index = 3
-            # Scale probability to 0.90 - 1.00 (Above 90)
-            risk_score = 0.90 + ((model_prob - c2) / max(1e-6, 1.0 - c2)) * 0.10
+            padding = (max_bound - min_bound) * 0.10
 
-        risk_score = max(0.0, min(1.0, risk_score))
+        adjusted_min = min_bound - padding
+        adjusted_max = max_bound + padding
+
+        if adjusted_max > adjusted_min:
+            # INVERTED FORMULA: Subtract from 1.0
+            # Lower probability maps to a Higher risk score
+            normalized_score = 1.0 - (
+                (model_prob - adjusted_min) / (adjusted_max - adjusted_min)
+            )
+        else:
+            normalized_score = 0.50
+
+        # Enforce strict 1% to 100% boundaries
+        risk_score = max(0.01, min(1.0, normalized_score))
 
         warnings.append(
-            f"Logistic Regression Probability: {model_prob:.4f} (Band {band_index})."
+            f"Logistic Regression Probability: {model_prob:.6e} "
+            f"(Inverted Normalization from live bounds {adjusted_min:.6e} - {adjusted_max:.6e})."
         )
     else:
         warnings.append(
