@@ -3,18 +3,24 @@
 import asyncio
 from collections import OrderedDict
 import copy
+from dataclasses import dataclass
 import time
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
+# External API endpoint for fetching weather forecasts.
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 # Global precision for coordinate rounding before external API calls.
 COORDINATE_DECIMAL_PRECISION = 2
 # Cache settings: 10 minutes TTL and a bounded in-memory size.
 CACHE_TTL_SECONDS = 600
 MAX_CACHE_ENTRIES = 200
+# Batch settings for unique cache misses.
+BATCH_MAX_SIZE = 5
+BATCH_MAX_WAIT_SECONDS = 2.0
+BATCH_WAIT_TIMEOUT_SECONDS = 35.0
 
 # Human-readable labels for selected WMO weather_code values (see Open-Meteo docs).
 _WEATHER_CODE_LABELS: dict[int, str] = {
@@ -50,8 +56,19 @@ def _get_road_code_label(weather_code: int, temperature: float | None) -> str:
 
 router = APIRouter(prefix="/weather", tags=["weather"])
 
-_weather_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
-_cache_locks: dict[str, asyncio.Lock] = {}
+_weather_cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+_batch_pending: OrderedDict[str, "_PendingBatchItem"] = OrderedDict()
+_batch_lock = asyncio.Lock()
+_batch_flush_task: asyncio.Task[None] | None = None
+
+
+@dataclass
+class _PendingBatchItem:
+    """A unique rounded coordinate waiting for the next batch call."""
+    cache_key: str
+    latitude: float
+    longitude: float
+    waiters: list[asyncio.Future[dict[str, Any]]]
 
 
 def _round_coordinate(value: float) -> float:
@@ -64,7 +81,7 @@ def _build_cache_key(latitude: float, longitude: float) -> str:
     return f"{latitude:.{COORDINATE_DECIMAL_PRECISION}f}:{longitude:.{COORDINATE_DECIMAL_PRECISION}f}"
 
 
-def _get_cached_payload(cache_key: str) -> dict[str, Any] | None:
+def _get_cached_payload(cache_key: str) -> Any | None:
     """Return cached payload if present and not expired."""
     entry = _weather_cache.get(cache_key)
     if entry is None:
@@ -80,7 +97,7 @@ def _get_cached_payload(cache_key: str) -> dict[str, Any] | None:
     return copy.deepcopy(payload)
 
 
-def _set_cached_payload(cache_key: str, payload: dict[str, Any]) -> None:
+def _set_cached_payload(cache_key: str, payload: Any) -> None:
     """Store payload in cache with TTL and enforce max entry cap."""
     expires_at = time.monotonic() + CACHE_TTL_SECONDS
     _weather_cache[cache_key] = (expires_at, copy.deepcopy(payload))
@@ -89,11 +106,162 @@ def _set_cached_payload(cache_key: str, payload: dict[str, Any]) -> None:
         _weather_cache.popitem(last=False)
 
 
-def _with_cached_flag(payload: dict[str, Any], cached: bool) -> dict[str, Any]:
+def _with_cached_flag(payload: Any, cached: bool) -> dict[str, Any]:
     """Return payload with a top-level cached flag."""
-    payload_with_flag = copy.deepcopy(payload)
-    payload_with_flag["cached"] = cached
-    return payload_with_flag
+    payload_copy = copy.deepcopy(payload)
+    if isinstance(payload_copy, dict):
+        payload_copy["cached"] = cached
+        return payload_copy
+    return {"cached": cached, "data": payload_copy}
+
+
+def _pop_next_batch_locked() -> list[_PendingBatchItem]:
+    """Pop the next batch from the pending queue (requires _batch_lock)."""
+    batch: list[_PendingBatchItem] = []
+    while _batch_pending and len(batch) < BATCH_MAX_SIZE:
+        _, pending_item = _batch_pending.popitem(last=False)
+        batch.append(pending_item)
+    return batch
+
+
+async def _flush_after_delay() -> None:
+    """Sleep for the batch window, then process queued requests."""
+    global _batch_flush_task
+    try:
+        await asyncio.sleep(BATCH_MAX_WAIT_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+    batch_to_process: list[_PendingBatchItem] = []
+    async with _batch_lock:
+        _batch_flush_task = None
+        batch_to_process = _pop_next_batch_locked()
+        if _batch_pending and _batch_flush_task is None:
+            _batch_flush_task = asyncio.create_task(_flush_after_delay())
+
+    if batch_to_process:
+        asyncio.create_task(_process_batch(batch_to_process))
+
+
+def _extract_bulk_results(payload: Any, expected_count: int) -> list[Any]:
+    """Normalize Open-Meteo responses into one result per requested coordinate."""
+    if isinstance(payload, list):
+        if len(payload) != expected_count:
+            raise ValueError(
+                f"Bulk response item count mismatch: expected {expected_count}, got {len(payload)}"
+            )
+        return payload
+
+    if expected_count == 1:
+        return [payload]
+
+    raise ValueError(
+        "Unexpected Open-Meteo bulk response format for multiple coordinates."
+    )
+
+
+async def _process_batch(batch: list[_PendingBatchItem]) -> None:
+    """Execute one upstream bulk request and resolve all waiting callers."""
+    global _batch_flush_task
+    latitude_query = ",".join(
+        f"{item.latitude:.{COORDINATE_DECIMAL_PRECISION}f}" for item in batch
+    )
+    longitude_query = ",".join(
+        f"{item.longitude:.{COORDINATE_DECIMAL_PRECISION}f}" for item in batch
+    )
+    params = {
+        "latitude": latitude_query,
+        "longitude": longitude_query,
+        "current": "temperature_2m,precipitation,weather_code",
+        "timezone": "auto",
+    }
+
+    try:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(OPEN_METEO_FORECAST_URL, params=params)
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to reach weather service: {e!s}",
+            ) from e
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Weather service returned {response.status_code}",
+            )
+
+        payload: Any = response.json()
+        raw_items = _extract_bulk_results(payload, len(batch))
+        for pending_item, raw_item in zip(batch, raw_items, strict=True):
+            enriched_item = _enrich_payload(raw_item)
+            _set_cached_payload(pending_item.cache_key, enriched_item)
+            for waiter in pending_item.waiters:
+                if not waiter.done():
+                    waiter.set_result(_with_cached_flag(enriched_item, cached=False))
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            error = e
+        else:
+            error = HTTPException(status_code=502, detail=f"Bulk weather fetch failed: {e!s}")
+
+        for pending_item in batch:
+            for waiter in pending_item.waiters:
+                if not waiter.done():
+                    waiter.set_exception(error)
+    finally:
+        async with _batch_lock:
+            if _batch_pending and _batch_flush_task is None:
+                _batch_flush_task = asyncio.create_task(_flush_after_delay())
+
+
+async def _enqueue_and_wait(cache_key: str, latitude: float, longitude: float) -> dict[str, Any]:
+    """Queue one cache miss and wait for its batched upstream result."""
+    global _batch_flush_task
+    loop = asyncio.get_running_loop()
+    waiter: asyncio.Future[dict[str, Any]] = loop.create_future()
+    batch_to_process: list[_PendingBatchItem] | None = None
+
+    async with _batch_lock:
+        cached_payload = _get_cached_payload(cache_key)
+        if cached_payload is not None:
+            return _with_cached_flag(cached_payload, cached=True)
+
+        pending_item = _batch_pending.get(cache_key)
+        if pending_item is None:
+            _batch_pending[cache_key] = _PendingBatchItem(
+                cache_key=cache_key,
+                latitude=latitude,
+                longitude=longitude,
+                waiters=[waiter],
+            )
+        else:
+            pending_item.waiters.append(waiter)
+
+        if len(_batch_pending) >= BATCH_MAX_SIZE:
+            batch_to_process = _pop_next_batch_locked()
+            if _batch_flush_task is not None:
+                _batch_flush_task.cancel()
+                _batch_flush_task = None
+            if _batch_pending and _batch_flush_task is None:
+                _batch_flush_task = asyncio.create_task(_flush_after_delay())
+        elif _batch_flush_task is None:
+            _batch_flush_task = asyncio.create_task(_flush_after_delay())
+
+    if batch_to_process:
+        asyncio.create_task(_process_batch(batch_to_process))
+
+    try:
+        return await asyncio.wait_for(waiter, timeout=BATCH_WAIT_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as e:
+        async with _batch_lock:
+            pending_item = _batch_pending.get(cache_key)
+            if pending_item and waiter in pending_item.waiters:
+                pending_item.waiters.remove(waiter)
+                if not pending_item.waiters:
+                    _batch_pending.pop(cache_key, None)
+        raise HTTPException(status_code=504, detail="Timed out waiting for batched weather result.") from e
 
 
 def _enrich_current_with_weather_label(payload: dict[str, Any]) -> dict[str, Any]:
@@ -124,6 +292,21 @@ def _enrich_current_with_weather_label(payload: dict[str, Any]) -> dict[str, Any
     return payload
 
 
+def _enrich_payload(payload: Any) -> Any:
+    """Enrich single or bulk weather payloads."""
+    if isinstance(payload, dict):
+        return _enrich_current_with_weather_label(payload)
+    if isinstance(payload, list):
+        enriched_list: list[Any] = []
+        for item in payload:
+            if isinstance(item, dict):
+                enriched_list.append(_enrich_current_with_weather_label(item))
+            else:
+                enriched_list.append(item)
+        return enriched_list
+    return payload
+
+
 @router.get("/forecast")
 async def get_forecast_current(
     latitude: float = Query(..., ge=-90.0, le=90.0, description="Latitude in degrees"),
@@ -141,35 +324,4 @@ async def get_forecast_current(
     cached_payload = _get_cached_payload(cache_key)
     if cached_payload is not None:
         return _with_cached_flag(cached_payload, cached=True)
-
-    lock = _cache_locks.setdefault(cache_key, asyncio.Lock())
-    async with lock:
-        cached_payload = _get_cached_payload(cache_key)
-        if cached_payload is not None:
-            return _with_cached_flag(cached_payload, cached=True)
-
-        params = {
-            "latitude": rounded_latitude,
-            "longitude": rounded_longitude,
-            "current": "temperature_2m,precipitation,weather_code",
-            "timezone": "auto",
-        }
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(OPEN_METEO_FORECAST_URL, params=params)
-        except httpx.RequestError as e:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Failed to reach weather service: {e!s}",
-            ) from e
-
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Weather service returned {response.status_code}",
-            )
-
-        payload: dict[str, Any] = response.json()
-        enriched_payload = _enrich_current_with_weather_label(payload)
-        _set_cached_payload(cache_key, enriched_payload)
-        return _with_cached_flag(enriched_payload, cached=False)
+    return await _enqueue_and_wait(cache_key, rounded_latitude, rounded_longitude)
