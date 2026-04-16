@@ -1,11 +1,10 @@
 # Road Report AI - Backend
 
-Backend API for crash risk prediction with FastAPI, SQLAlchemy async, and a PyTorch model pipeline.
+FastAPI backend for crash-risk prediction using one production model: the group logistic-regression model artifacts.
 
-## 1) Setup and Run (Windows)
+## 1) Setup and run (Windows)
 
 ```bash
-# Recommended Python version: 3.13
 py -3.13 -m venv venv313
 .\venv313\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -16,7 +15,21 @@ App URLs:
 - API: `http://localhost:8000`
 - Swagger: `http://localhost:8000/docs`
 
-## 2) Environment File
+## 2) Single model source of truth
+
+The backend uses only these artifacts:
+- `app/services/logistic_regression_model.pth`
+- `app/services/feature_columns.pkl`
+
+They are loaded by `app/services/risk.py` at runtime.
+
+When the model is retrained:
+1. train locally
+2. replace those two files
+3. commit and push
+4. Render auto-redeploys with the updated model
+
+## 3) Environment file
 
 Copy `.env.example` to `.env` and set values as needed.
 
@@ -28,8 +41,9 @@ Important keys:
 - `WEATHER_API_BASE_URL`
 - `WEATHER_USER_AGENT`
 - `WEATHER_TIMEOUT_SECONDS`
-- `MODEL_FILE_PATH="ml/artifacts/latest-model.pt"`
-- `MODEL_VERSION="baseline-v1"`
+- `MODEL_FILE_PATH`
+- `FEATURE_COLUMNS_PATH`
+- `MODEL_VERSION`
 
 Production CORS example:
 
@@ -37,59 +51,7 @@ Production CORS example:
 CORS_ORIGINS_CSV=https://road-report-ai-frontend.vercel.app,https://www.yourdomain.com
 ```
 
-## 3) Train the Model
-
-If `csv/TrainingData.csv` exists, train and export model artifacts:
-
-```bash
-.\venv313\Scripts\python -m ml.training --csv-path csv/TrainingData.csv --output-path ml/artifacts/latest-model.pt --row-limit 250000 --epochs 8 --batch-size 512
-```
-
-Optional evaluation report:
-
-```bash
-.\venv313\Scripts\python -m ml.evaluate --csv-path csv/TrainingData.csv --output-path ml/artifacts/latest-model.pt --row-limit 250000 --epochs 8 --batch-size 512
-```
-
-## 4) Test with Swagger
-
-1. Start backend with `python main.py`
-2. Open `http://localhost:8000/docs`
-3. Test these endpoints:
-   - `GET /api/v1/health`
-   - `GET /api/v1/health/model`
-   - `GET /api/v1/risk/model-metrics`
-   - `POST /api/v1/risk/predict`
-
-### Swagger request example (likely lower risk)
-
-Use in `POST /api/v1/risk/predict`:
-
-```json
-{
-  "latitude": 32.7767,
-  "longitude": -96.7970,
-  "road_name": "Main St",
-  "segment": "Dallas city center",
-  "road_class": "CITY STREET",
-  "weather_condition": "1 - CLEAR"
-}
-```
-
-### Swagger request example (likely higher risk)
-
-```json
-{
-  "latitude": 32.7767,
-  "longitude": -96.7970,
-  "road_name": "I-35E",
-  "segment": "Downtown Dallas",
-  "road_class": "INTERSTATE",
-  "weather_condition": "3 - RAIN"
-}
-```
-
-## 5) API Endpoints
+## 4) Endpoints
 
 | Method | Endpoint |
 |---|---|
@@ -98,26 +60,24 @@ Use in `POST /api/v1/risk/predict`:
 | GET | `/api/v1/health/model` |
 | GET | `/api/v1/risk/model-metrics` |
 | POST | `/api/v1/risk/predict` |
+| GET | `/api/v1/weather/forecast` |
 
-## 6) Render Deployment (Model-prototype)
+## 5) Render deployment
 
-- Deploy from branch: `Model-prototype`
+- Branch: `main`
 - Build command: `pip install -r requirements.txt`
 - Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 
-Required env variables for production:
+Required env variables:
 
 ```env
 API_V1_PREFIX=/api/v1
 DEBUG=false
 CORS_ORIGINS_CSV=https://road-report-ai-frontend.vercel.app
-MODEL_FILE_PATH=ml/artifacts/latest-model.pt
-MODEL_VERSION=baseline-v1
+MODEL_FILE_PATH=app/services/logistic_regression_model.pth
+FEATURE_COLUMNS_PATH=app/services/feature_columns.pkl
+MODEL_VERSION=log-reg-v1
 WEATHER_API_BASE_URL=https://api.weather.gov
 WEATHER_USER_AGENT=(roadreportai.prod, your-email@example.com)
 WEATHER_TIMEOUT_SECONDS=6.0
 ```
-
-Notes:
-- Do not wrap `MODEL_FILE_PATH` in quotes in Render env vars.
-- `WEATHER_USER_AGENT` should include app identifier and contact (email is fine).

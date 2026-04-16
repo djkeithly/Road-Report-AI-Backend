@@ -25,9 +25,10 @@ class Settings(BaseSettings):
     weather_user_agent: str = "(roadreportai.local, dev@roadreportai.local)"
     weather_timeout_seconds: float = 6.0
 
-    # ML scoring runtime configuration
-    model_file_path: str = "ml/artifacts/latest-model.pt"
-    model_version: str = "baseline-v0"
+    # ML scoring runtime configuration (groupmate logistic regression artifacts)
+    model_file_path: str = "app/services/logistic_regression_model.pth"
+    feature_columns_path: str = "app/services/feature_columns.pkl"
+    model_version: str = "log-reg-v1"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -98,7 +99,17 @@ class Settings(BaseSettings):
     def parse_model_file_path(cls, value: Any) -> Any:
         """Normalize MODEL_FILE_PATH and support quoted env values."""
         if value == "":
-            return "ml/artifacts/latest-model.pt"
+            return "app/services/logistic_regression_model.pth"
+        if isinstance(value, str):
+            return value.strip().strip("\"'")
+        return value
+
+    @field_validator("feature_columns_path", mode="before")
+    @classmethod
+    def parse_feature_columns_path(cls, value: Any) -> Any:
+        """Normalize FEATURE_COLUMNS_PATH and support quoted env values."""
+        if value == "":
+            return "app/services/feature_columns.pkl"
         if isinstance(value, str):
             return value.strip().strip("\"'")
         return value

@@ -190,12 +190,10 @@ def _load_model_bundle() -> dict[str, object] | None:
     model_candidates = [
         Path(settings.model_file_path),
         project_root / settings.model_file_path,
-        project_root / "app/services/logistic_regression_model.pth",
     ]
     cols_candidates = [
-        Path("feature_columns.pkl"),
-        project_root / "feature_columns.pkl",
-        project_root / "app/services/feature_columns.pkl",
+        Path(settings.feature_columns_path),
+        project_root / settings.feature_columns_path,
     ]
 
     model_path = next((path for path in model_candidates if path.exists()), None)
@@ -379,7 +377,6 @@ def get_model_runtime_metadata() -> dict[str, str | int | float | bool]:
     model_candidates = [
         Path(settings.model_file_path),
         project_root / settings.model_file_path,
-        project_root / "app/services/logistic_regression_model.pth",
     ]
     model_path = next((path for path in model_candidates if path.exists()), None)
     if model_path is None:
@@ -398,7 +395,6 @@ def get_model_runtime_metadata() -> dict[str, str | int | float | bool]:
 
     meta_candidates = [
         model_path.with_suffix(".meta.json"),
-        project_root / "ml/artifacts/latest-model.meta.json",
     ]
     meta_path = next((path for path in meta_candidates if path.exists()), None)
     if meta_path is not None:
