@@ -17,9 +17,17 @@ def _metadata_payload(metadata: dict[str, str | int | float | bool]) -> dict:
         "status": "ok",
         "message": "Model artifact and metadata loaded.",
         "model_path": str(metadata.get("model_path", "")),
+        "feature_columns_path": str(metadata.get("feature_columns_path", "")),
+        "model_type": str(metadata.get("model_type", "")),
+        "model_version": str(metadata.get("model_version", "")),
         "available": True,
         "input_size": (
             int(metadata["input_size"]) if metadata.get("input_size") is not None else None
+        ),
+        "known_road_count": (
+            int(metadata["known_road_count"])
+            if metadata.get("known_road_count") is not None
+            else None
         ),
         "rows_used": (
             int(metadata["rows_used"]) if metadata.get("rows_used") is not None else None
@@ -55,6 +63,7 @@ async def model_health(db: AsyncSession = Depends(get_db)) -> ModelMetadataRespo
             "status": "degraded",
             "message": str(metadata["message"]),
             "model_path": str(metadata["model_path"]),
+            "feature_columns_path": str(metadata.get("feature_columns_path", "")),
             "available": False,
         }
 

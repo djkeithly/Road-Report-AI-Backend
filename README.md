@@ -29,6 +29,17 @@ When the model is retrained:
 3. commit and push
 4. Render auto-redeploys with the updated model
 
+Model health endpoints:
+- `GET /api/v1/health/model`
+- `GET /api/v1/risk/model-metrics`
+
+They now report:
+- resolved model file path
+- resolved feature-columns path
+- model type/version
+- inferred input size
+- known road feature count
+
 ## 3) Environment file
 
 Copy `.env.example` to `.env` and set values as needed.

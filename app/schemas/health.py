@@ -11,8 +11,12 @@ class ModelMetadataResponse(BaseModel):
     status: Literal["ok", "degraded"]
     message: str
     model_path: str
+    feature_columns_path: str | None = None
+    model_type: str | None = None
+    model_version: str | None = None
     available: bool | None = None
     input_size: int | None = None
+    known_road_count: int | None = None
     rows_used: int | None = None
     threshold: float | None = None
     accuracy: float | None = None

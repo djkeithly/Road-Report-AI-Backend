@@ -286,11 +286,11 @@ def _infer_model_probability(
     query_time: datetime,
     city: str,
     road_class: str | None,
-) -> tuple[float | None, float | None, float | None]:
-    """Return model probability, along with dynamic min and max bounds for the current context."""
+) -> float | None:
+    """Return logistic-regression probability for the current input row."""
     bundle = _load_model_bundle()
     if bundle is None:
-        return None, None, None
+        return None
 
     model = bundle["model"]
     feature_columns = bundle["feature_columns"]
@@ -311,63 +311,64 @@ def _infer_model_probability(
     with torch.no_grad():
         probability = float(torch.sigmoid(model(tensor)).item())
 
-    # 2. Dynamically calculate bounds using LIVE time, month, and city
-    crash_time_int = int((query_time.hour * 100) + query_time.minute)
-    crash_month_int = int(query_time.month)
-    street_name = request.road_name.upper() if request.road_name else "UNKNOWN"
+    return probability
 
-    banding_dataset = [
-        {
-            "City": [city],
-            "County": ["DALLAS"],
-            "Crash Month": [crash_month_int],
-            "Crash Time": [crash_time_int],
-            "Road Class": ["CITY STREET"],
-            "Street Name": [street_name],
-            "Surface Condition": ["1 - DRY"],
-            "Weather Condition": ["1 - CLEAR"],
-        },
-        {
-            "City": [city],
-            "County": ["DALLAS"],
-            "Crash Month": [crash_month_int],
-            "Crash Time": [crash_time_int],
-            "Road Class": ["INTERSTATE"],
-            "Street Name": [street_name],
-            "Surface Condition": ["1 - DRY"],
-            "Weather Condition": ["1 - CLEAR"],
-        },
-        {
-            "City": [city],
-            "County": ["DALLAS"],
-            "Crash Month": [crash_month_int],
-            "Crash Time": [crash_time_int],
-            "Road Class": ["INTERSTATE"],
-            "Street Name": [street_name],
-            "Surface Condition": ["2 - WET"],
-            "Weather Condition": ["3 - RAIN"],
-        },
-    ]
 
-    cutoffs = []
-    for band_item in banding_dataset:
-        custom_df = pd.DataFrame(band_item)
-        custom_encoded = pd.get_dummies(custom_df)
-        custom_aligned = custom_encoded.reindex(columns=feature_columns, fill_value=0)
-        custom_tensor = torch.tensor(custom_aligned.to_numpy(dtype=np.float32))
+@lru_cache(maxsize=1)
+def _known_road_names() -> tuple[str, ...]:
+    """Return sorted road names inferred from model feature columns."""
+    bundle = _load_model_bundle()
+    if bundle is None:
+        return tuple()
 
-        with torch.no_grad():
-            prob = float(torch.sigmoid(model(custom_tensor)).item())
-            cutoffs.append(prob)
+    feature_columns_obj = bundle["feature_columns"]
+    if not isinstance(feature_columns_obj, (list, tuple)):
+        try:
+            feature_columns = list(feature_columns_obj)
+        except TypeError:
+            return tuple()
+    else:
+        feature_columns = list(feature_columns_obj)
 
-    min_bound = min(cutoffs)
-    max_bound = max(cutoffs)
+    if not feature_columns:
+        return tuple()
 
-    # Ensure probability is always within the known bounds
-    min_bound = min(min_bound, probability)
-    max_bound = max(max_bound, probability)
+    prefixes = ("Street Name_", "streetname_", "street_name_")
+    road_names: set[str] = set()
+    for column in feature_columns:
+        if not isinstance(column, str):
+            continue
+        for prefix in prefixes:
+            if column.startswith(prefix):
+                road_name = column[len(prefix) :].strip()
+                if road_name:
+                    road_names.add(road_name)
+                break
 
-    return probability, min_bound, max_bound
+    return tuple(sorted(road_names))
+
+
+def get_road_suggestions(query: str, *, limit: int = 8) -> list[str]:
+    """Return road-name autocomplete suggestions based on model features."""
+    needle = query.strip().lower()
+    if not needle:
+        return []
+
+    starts_with: list[str] = []
+    contains: list[str] = []
+    for road_name in _known_road_names():
+        lowered = road_name.lower()
+        if lowered.startswith(needle):
+            starts_with.append(road_name)
+        elif needle in lowered:
+            contains.append(road_name)
+        if len(starts_with) >= limit:
+            break
+
+    if len(starts_with) < limit:
+        remaining = limit - len(starts_with)
+        starts_with.extend(contains[:remaining])
+    return starts_with[:limit]
 
 
 def get_model_runtime_metadata() -> dict[str, str | int | float | bool]:
@@ -379,19 +380,44 @@ def get_model_runtime_metadata() -> dict[str, str | int | float | bool]:
         project_root / settings.model_file_path,
     ]
     model_path = next((path for path in model_candidates if path.exists()), None)
-    if model_path is None:
+    cols_candidates = [
+        Path(settings.feature_columns_path),
+        project_root / settings.feature_columns_path,
+    ]
+    cols_path = next((path for path in cols_candidates if path.exists()), None)
+
+    if model_path is None or cols_path is None:
         unresolved_path = str((project_root / settings.model_file_path).resolve())
+        unresolved_cols = str((project_root / settings.feature_columns_path).resolve())
         return {
             "available": False,
             "model_path": unresolved_path,
-            "message": "Logistic Regression model artifact not found.",
+            "feature_columns_path": unresolved_cols,
+            "message": "Model artifact files are missing.",
         }
 
     metadata: dict[str, str | int | float | bool] = {
         "available": True,
         "model_path": str(model_path),
+        "feature_columns_path": str(cols_path),
+        "model_type": "logistic_regression",
+        "model_version": settings.model_version,
         "message": "Using PyTorch Logistic Regression model",
     }
+
+    try:
+        with cols_path.open("rb") as columns_file:
+            feature_columns = pickle.load(columns_file)
+        metadata["input_size"] = len(feature_columns)
+        metadata["known_road_count"] = len(
+            [
+                col
+                for col in feature_columns
+                if isinstance(col, str) and col.startswith("Street Name_")
+            ]
+        )
+    except Exception:
+        metadata["message"] = "Model file found, but feature columns could not be read."
 
     meta_candidates = [
         model_path.with_suffix(".meta.json"),
@@ -448,7 +474,7 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
     city = await _get_city_from_coords(request.latitude, request.longitude)
     heuristic_score = _score_from_components(components)
 
-    model_prob, min_bound, max_bound = _infer_model_probability(
+    model_prob = _infer_model_probability(
         request=request,
         weather_condition=weather_condition,
         query_time=query_time,
@@ -456,30 +482,15 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
         road_class=inferred_road_class,
     )
 
-    if model_prob is not None and min_bound is not None and max_bound is not None:
-        if max_bound - min_bound < 1e-6:
-            padding = 0.05
-        else:
-            padding = (max_bound - min_bound) * 0.10
-
-        adjusted_min = min_bound - padding
-        adjusted_max = max_bound + padding
-
-        if adjusted_max > adjusted_min:
-            # INVERTED FORMULA: Subtract from 1.0
-            # Lower probability maps to a Higher risk score
-            normalized_score = 1.0 - (
-                (model_prob - adjusted_min) / (adjusted_max - adjusted_min)
-            )
-        else:
-            normalized_score = 0.50
-
-        # Enforce strict 1% to 100% boundaries
-        risk_score = max(0.01, min(1.0, normalized_score))
+    if model_prob is not None:
+        # Blend model confidence with feature-based heuristic to avoid score collapse.
+        model_component = 1.0 - model_prob
+        blended_score = (0.7 * model_component) + (0.3 * heuristic_score)
+        risk_score = max(0.01, min(1.0, blended_score))
 
         warnings.append(
             f"Logistic Regression Probability: {model_prob:.6e} "
-            f"(Inverted Normalization from live bounds {adjusted_min:.6e} - {adjusted_max:.6e})."
+            f"(blended with heuristic score {heuristic_score:.4f})."
         )
     else:
         warnings.append(
