@@ -2,6 +2,7 @@
 
 import json
 import pickle
+import re
 from datetime import UTC, datetime
 from functools import lru_cache
 from math import fabs
@@ -168,6 +169,100 @@ def requested_value_or_dash(value: str | None) -> str:
     return value
 
 
+def _normalize_road_text(value: str) -> str:
+    """Normalize road-name text to improve model feature matching."""
+    cleaned = re.sub(r"[^A-Z0-9]+", " ", value.upper()).strip()
+    return re.sub(r"\s+", " ", cleaned)
+
+
+def _token_set(value: str) -> set[str]:
+    """Return normalized token set with low-information words removed."""
+    stop_words = {
+        "N",
+        "S",
+        "E",
+        "W",
+        "NORTH",
+        "SOUTH",
+        "EAST",
+        "WEST",
+        "COUNTY",
+        "CITY",
+        "OF",
+        "THE",
+    }
+    return {token for token in _normalize_road_text(value).split() if token and token not in stop_words}
+
+
+def _best_fuzzy_road_match(candidate: str, known: set[str]) -> str | None:
+    """Return the closest known road if token overlap is sufficiently strong."""
+    candidate_tokens = _token_set(candidate)
+    if not candidate_tokens:
+        return None
+
+    best_match: str | None = None
+    best_score = 0.0
+    for road in known:
+        road_tokens = _token_set(road)
+        if not road_tokens:
+            continue
+        overlap = len(candidate_tokens & road_tokens)
+        if overlap == 0:
+            continue
+        score = overlap / max(len(candidate_tokens), len(road_tokens))
+        if score > best_score:
+            best_score = score
+            best_match = road
+
+    if best_score >= 0.6:
+        return best_match
+    return None
+
+
+def _canonicalize_road_name_for_model(road_name: str | None) -> str:
+    """Map user-entered road names to the closest known model feature label."""
+    if not road_name:
+        return "UNKNOWN"
+
+    normalized = _normalize_road_text(road_name)
+    if not normalized:
+        return "UNKNOWN"
+
+    known = set(_known_road_names())
+    if normalized in known:
+        return normalized
+
+    long_to_short = {
+        "ROAD": "RD",
+        "STREET": "ST",
+        "BOULEVARD": "BLVD",
+        "TURNPIKE": "TPKE",
+        "AVENUE": "AVE",
+        "HIGHWAY": "HWY",
+        "FREEWAY": "FWY",
+        "INTERSTATE": "IH",
+    }
+    short_to_long = {value: key for key, value in long_to_short.items()}
+
+    words = normalized.split()
+    abbreviated = " ".join(long_to_short.get(word, word) for word in words)
+    expanded = " ".join(short_to_long.get(word, word) for word in words)
+
+    for candidate in (abbreviated, expanded):
+        if candidate in known:
+            return candidate
+
+    fuzzy = _best_fuzzy_road_match(abbreviated, known)
+    if fuzzy:
+        return fuzzy
+
+    fuzzy = _best_fuzzy_road_match(expanded, known)
+    if fuzzy:
+        return fuzzy
+
+    return normalized
+
+
 def _score_from_components(components: RiskComponents) -> float:
     """Calculate normalized 0-1 risk score from weighted components."""
     component_scores = [
@@ -266,17 +361,28 @@ def _build_inference_df(
     crash_time_int = int((query_time.hour * 100) + query_time.minute)
     crash_month_int = int(query_time.month)
 
+    canonical_road_name = _canonicalize_road_name_for_model(request.road_name)
+
     row = {
         "City": [city],
         "County": ["DALLAS"],
         "Crash Month": [crash_month_int],
         "Crash Time": [crash_time_int],
         "Road Class": [road_class.upper() if road_class else "UNKNOWN"],
-        "Street Name": [request.road_name.upper() if request.road_name else "UNKNOWN"],
+        "Street Name": [canonical_road_name],
         "Surface Condition": [s_cond],
         "Weather Condition": [w_cond],
     }
     return pd.DataFrame(row)
+
+
+def _banding_anchor_street_name() -> str:
+    """Return a stable street name anchor for normalization cutoffs."""
+    known = _known_road_names()
+    for preferred in ("S I 35E S", "I 35E", "IH0035E"):
+        if preferred in known:
+            return preferred
+    return known[0] if known else "UNKNOWN"
 
 
 def _infer_model_probability(
@@ -286,11 +392,11 @@ def _infer_model_probability(
     query_time: datetime,
     city: str,
     road_class: str | None,
-) -> float | None:
-    """Return logistic-regression probability for the current input row."""
+) -> tuple[float | None, float | None, float | None]:
+    """Return model probability, along with dynamic min and max bounds for the current context."""
     bundle = _load_model_bundle()
     if bundle is None:
-        return None
+        return None, None, None
 
     model = bundle["model"]
     feature_columns = bundle["feature_columns"]
@@ -311,7 +417,59 @@ def _infer_model_probability(
     with torch.no_grad():
         probability = float(torch.sigmoid(model(tensor)).item())
 
-    return probability
+    # 2. Dynamically calculate bounds using LIVE time, month, and city
+    crash_time_int = int((query_time.hour * 100) + query_time.minute)
+    crash_month_int = int(query_time.month)
+    street_name = _banding_anchor_street_name()
+
+    banding_dataset = [
+        {
+            "City": [city],
+            "County": ["DALLAS"],
+            "Crash Month": [crash_month_int],
+            "Crash Time": [crash_time_int],
+            "Road Class": ["CITY STREET"],
+            "Street Name": [street_name],
+            "Surface Condition": ["1 - DRY"],
+            "Weather Condition": ["1 - CLEAR"],
+        },
+        {
+            "City": [city],
+            "County": ["DALLAS"],
+            "Crash Month": [crash_month_int],
+            "Crash Time": [crash_time_int],
+            "Road Class": ["INTERSTATE"],
+            "Street Name": [street_name],
+            "Surface Condition": ["1 - DRY"],
+            "Weather Condition": ["1 - CLEAR"],
+        },
+        {
+            "City": [city],
+            "County": ["DALLAS"],
+            "Crash Month": [crash_month_int],
+            "Crash Time": [crash_time_int],
+            "Road Class": ["INTERSTATE"],
+            "Street Name": [street_name],
+            "Surface Condition": ["2 - WET"],
+            "Weather Condition": ["3 - RAIN"],
+        },
+    ]
+
+    cutoffs = []
+    for band_item in banding_dataset:
+        custom_df = pd.DataFrame(band_item)
+        custom_encoded = pd.get_dummies(custom_df)
+        custom_aligned = custom_encoded.reindex(columns=feature_columns, fill_value=0)
+        custom_tensor = torch.tensor(custom_aligned.to_numpy(dtype=np.float32))
+
+        with torch.no_grad():
+            prob = float(torch.sigmoid(model(custom_tensor)).item())
+            cutoffs.append(prob)
+
+    min_bound = min(cutoffs)
+    max_bound = max(cutoffs)
+
+    return probability, min_bound, max_bound
 
 
 @lru_cache(maxsize=1)
@@ -474,7 +632,7 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
     city = await _get_city_from_coords(request.latitude, request.longitude)
     heuristic_score = _score_from_components(components)
 
-    model_prob = _infer_model_probability(
+    model_prob, min_bound, max_bound = _infer_model_probability(
         request=request,
         weather_condition=weather_condition,
         query_time=query_time,
@@ -482,15 +640,30 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
         road_class=inferred_road_class,
     )
 
-    if model_prob is not None:
-        # Blend model confidence with feature-based heuristic to avoid score collapse.
-        model_component = 1.0 - model_prob
-        blended_score = (0.7 * model_component) + (0.3 * heuristic_score)
-        risk_score = max(0.01, min(1.0, blended_score))
+    if model_prob is not None and min_bound is not None and max_bound is not None:
+        if max_bound - min_bound < 1e-6:
+            padding = 0.05
+        else:
+            padding = (max_bound - min_bound) * 0.10
+
+        adjusted_min = min_bound - padding
+        adjusted_max = max_bound + padding
+
+        if adjusted_max > adjusted_min:
+            # INVERTED FORMULA: Subtract from 1.0
+            # Lower probability maps to a Higher risk score
+            normalized_score = 1.0 - (
+                (model_prob - adjusted_min) / (adjusted_max - adjusted_min)
+            )
+        else:
+            normalized_score = 0.50
+
+        # Enforce strict 1% to 100% boundaries
+        risk_score = max(0.01, min(1.0, normalized_score))
 
         warnings.append(
             f"Logistic Regression Probability: {model_prob:.6e} "
-            f"(blended with heuristic score {heuristic_score:.4f})."
+            f"(Inverted Normalization from live bounds {adjusted_min:.6e} - {adjusted_max:.6e})."
         )
     else:
         warnings.append(
