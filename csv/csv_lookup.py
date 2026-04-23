@@ -206,6 +206,47 @@ def append_compared_places_to_stations_csv(
         new_df.to_csv(path, index=False)
     return len(rows)
 
+class ComparedCoord(TypedDict):
+    lat: float
+    lon: float
+    name: str
+
+
+CITIES_CSV = "weather/weather_csvs/cities.csv"
+
+
+def write_cities_csv(
+    places: list[str],
+    compared_coords: list[ComparedCoord | tuple[float, float] | None],
+) -> Path:
+    """
+    Write ``places`` and coordinates to ``weather/weather_csvs/cities.csv``.
+
+    Each row uses the corresponding ``places`` string as ``name`` (not any
+    ``name`` field on the coordinate object). ``compared_coords[i]`` may be a
+    ``ComparedCoord`` dict, a ``(lat, lon)`` tuple, or ``None`` (blank lat/lon).
+
+    ``places`` and ``compared_coords`` must have the same length.
+    """
+    if len(places) != len(compared_coords):
+        raise ValueError("places and compared_coords must have the same length.")
+
+    rows: list[dict[str, object]] = []
+    for place, item in zip(places, compared_coords):
+        if item is None:
+            print(f"Could not geocode '{place}', skipping coordinates.")
+            continue
+        elif isinstance(item, tuple):
+            lat, lon = item
+            rows.append({"name": place, "lat": lat, "lon": lon})
+        else:
+            rows.append({"name": place, "lat": item["lat"], "lon": item["lon"]})
+
+    path = _resolve_csv_path(CITIES_CSV)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows, columns=["name", "lat", "lon"]).to_csv(path, index=False)
+    return path
+
 
 def lookup(
     src_path: str | Path,
@@ -223,11 +264,11 @@ def lookup(
     places = read_unique_places_from_csv(src_path, cities=cities)
 
     # Get all the existing stations from stations.csv
-    stations = read_stations_places(stations_csv)
+    # stations = read_stations_places(stations_csv)
 
-    if len(stations) == 0:
-        print("No existing stations, catastrophic error, canceling data generation")
-        return False
+    # if len(stations) == 0:
+    #     print("No existing stations, catastrophic error, canceling data generation")
+    #     return False
 
     # Download coordinates from geocoding
     compared_coords: list[tuple[float, float] | None] = []
@@ -240,22 +281,26 @@ def lookup(
             compared_coords.append(None)
         time.sleep(1)
     
-    print("Necessary lookups complete, making station comparisons and appending to stations.csv...")
+    # print("Necessary lookups complete, making station comparisons and appending to stations.csv...")
 
-    # Drop places that already appear as a station ``name`` (do not conflate with geocode failure).
-    existing_names = {s["name"].strip().casefold() for s in stations}
-    filtered_places: list[str] = []
-    filtered_coords: list[tuple[float, float] | None] = []
-    for place, coord in zip(places, compared_coords):
-        if place.strip().casefold() in existing_names:
-            print(f"'{place}' already has an entry in {stations_csv}, skipping.")
-            continue
-        filtered_places.append(place)
-        filtered_coords.append(coord)
+    # # Drop places that already appear as a station ``name`` (do not conflate with geocode failure).
+    # existing_names = {s["name"].strip().casefold() for s in stations}
+    # filtered_places: list[str] = []
+    # filtered_coords: list[tuple[float, float] | None] = []
+    # for place, coord in zip(places, compared_coords):
+    #     if place.strip().casefold() in existing_names:
+    #         print(f"'{place}' already has an entry in {stations_csv}, skipping.")
+    #         continue
+    #     filtered_places.append(place)
+    #     filtered_coords.append(coord)
 
     # Append new rows to stations.csv for places that don't already have entries.
-    n = append_compared_places_to_stations_csv(
-        filtered_places, filtered_coords, stations, stations_csv=stations_csv
-    )
-    print(f"Appended {n} row(s) to {_resolve_csv_path(stations_csv)}")
+    # n = append_compared_places_to_stations_csv(
+    #     filtered_places, filtered_coords, stations, stations_csv=stations_csv
+    # )
+
+    write_cities_csv(places, compared_coords)
+
+    print("Geocoding pass complete (stations.csv append is commented out).")
     return True
+

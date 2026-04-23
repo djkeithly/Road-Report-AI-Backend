@@ -1,4 +1,3 @@
-import argparse
 from pathlib import Path
 from typing import Callable
 
@@ -474,30 +473,8 @@ def create_final_weather_csv(
 	return output_path
 
 #	#	#	#	#	#	#	#	#
-#  			Main				#
+#  			Helpers				#
 #	#	#	#	#	#	#	#	#
-
-# This helper parses command-line arguments so the script can be used directly from terminal.
-def parse_args() -> argparse.Namespace:
-	"""Parse command-line arguments for weather CSV filtering."""
-	parser = argparse.ArgumentParser(
-		description="Run selected weather-data cleaning steps on a CSV file."
-	)
-	parser.add_argument(
-		"filename",
-		nargs="?",
-		default="WeatherData.csv",
-		help="Input CSV filename or path (default: WeatherData.csv)",
-	)
-	parser.add_argument(
-		"-o",
-		"--output",
-		dest="output_filename",
-		default=None,
-		help="Optional output CSV filename or path. If omitted, overwrites input file.",
-	)
-	return parser.parse_args()
-
 
 # Registry for available cleaning steps.
 # Add new functions here as they are created.
@@ -511,16 +488,19 @@ WEATHER_CLEANING_STEPS: dict[str, WeatherCleaningStep] = {
 }
 
 
-# This function runs selected cleaning steps in order from parsed CLI args.
+# This function runs selected cleaning steps in order on one input CSV.
 def run_weather_cleaning_steps(
-	args: argparse.Namespace,
+	filename: str = "WeatherData.csv",
+	output_filename: str | None = None,
 	steps_to_run: tuple[str, ...] | list[str] | None = None,
 ) -> Path:
 	"""
-	Run selected weather-cleaning steps using parsed CLI arguments.
+	Run selected weather-cleaning steps on a CSV file.
 
 	Args:
-		args (argparse.Namespace): Parsed command-line arguments.
+		filename (str): Input CSV filename or path.
+		output_filename (str | None): Optional path for the first step's output.
+			If None, the first step overwrites the input file.
 		steps_to_run (tuple[str, ...] | list[str] | None): Ordered cleaning step names.
 			If None, runs all registered steps in mapping order.
 
@@ -540,8 +520,8 @@ def run_weather_cleaning_steps(
 		raise ValueError(f"Unknown cleaning step(s): {', '.join(unknown_steps)}")
 
 	final_output: Path | None = None
-	current_input = args.filename
-	target_output = args.output_filename
+	current_input = filename
+	target_output = output_filename
 
 	for step_index, step_name in enumerate(selected_steps):
 		step_function = WEATHER_CLEANING_STEPS[step_name]
@@ -554,39 +534,24 @@ def run_weather_cleaning_steps(
 
 
 # Main functions
-if __name__ == "__main__":
-	#	#	#	#	#	#	#	#	#
-	# 			File Path			#
-	#	#	#	#	#	#	#	#	#
-	# Change this one line to choose the starting weather CSV file.
-	STARTING_WEATHER_FILE = "WeatherStart.csv"
-
-	# Optional output file for the final weather CSV.
-	FINAL_WEATHER_OUTPUT_FILE = "FinalWeather.csv"
-
+def preprocess_weather_csv(filename: str = "WeatherData.csv") -> None:
 	# Pick cleaning steps by name, in order.
 	# Examples:
-	# ("keep_columns",)
+	# ("remove_columns",)
 	# ("split_date_time",)
 	# ("remove_empty_aa1",)
 	# ("create_ice_flag",)
 	# ("remove_non_ice_zero_precip_rows",)
-	# ("keep_columns", "split_date_time", "remove_empty_aa1", "create_ice_flag", "remove_non_ice_zero_precip_rows")
+	# ("remove_columns", "split_date_time", "remove_empty_aa1", "create_ice_flag", "remove_non_ice_zero_precip_rows")
 	STEPS_TO_RUN = (
 		"remove_columns",
-		"split_date_time",
 		"remove_empty_aa1",
 		"create_ice_flag",
-		"remove_non_ice_zero_precip_rows",
-	)
-
-	args = argparse.Namespace(
-		filename=STARTING_WEATHER_FILE,
-		output_filename=None,
 	)
 
 	cleaned_weather_path = run_weather_cleaning_steps(
-		args,
+		filename=filename,
+		output_filename=filename,
 		steps_to_run=STEPS_TO_RUN,
 	)
 	
@@ -598,8 +563,45 @@ if __name__ == "__main__":
 	if "remove_non_ice_zero_precip_rows" in STEPS_TO_RUN:
 		final_weather_path = create_final_weather_csv(
 			filename=str(cleaned_weather_path),
-			output_filename=FINAL_WEATHER_OUTPUT_FILE,
+			output_filename=filename,
 		)
 		print(f"Saved final weather CSV to: {final_weather_path}")
 	else:
 		print("Skipped final weather CSV creation (requires 'remove_non_ice_zero_precip_rows' step).")
+
+
+def _weather_csvs_dir() -> Path:
+    """Directory containing downloaded city CSVs; resolved from this file's location."""
+    return Path(__file__).resolve().parent / "weather_csvs"
+
+
+def csv_files() -> list[str]:
+    """
+    List base names of all ``.csv`` files in ``weather_csvs`` except ``stations.csv``.
+    """
+    root = _weather_csvs_dir()
+    if not root.is_dir():
+        return []
+
+    out: list[str] = []
+    for p in sorted(root.glob("*.csv")):
+        if p.name.lower() == "stations.csv":
+            continue
+        out.append(p.name)
+
+    return out
+
+
+#	#	#	#	#	#	#	#	#	#	#
+#  			Master Function				#
+#	#	#	#	#	#	#	#	#	#   #
+
+def preprocess_all_weather_csvs() -> None:
+	csv_filenames = csv_files()
+	if not csv_filenames:
+		print("No CSV files found to preprocess.")
+		return
+
+	for csv_filename in csv_filenames:
+		print(f"Preprocessing {csv_filename}...")
+		preprocess_weather_csv(filename=str(_weather_csvs_dir() / csv_filename))

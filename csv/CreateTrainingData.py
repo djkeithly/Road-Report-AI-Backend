@@ -1,6 +1,8 @@
 from weather.csv_geocode import geocode
 from weather.weather_download import create_weather_files
 from csv_lookup import lookup
+from weather.csv_weather import preprocess_all_weather_csvs
+from weather.open_download import open_download
 import sys
 
 # Rare manual entry point.
@@ -9,6 +11,11 @@ import sys
 if __name__ == "__main__":
     state = "TX"
     ctry = "US"
+
+    if "--help" in sys.argv:
+        print("Preprocessing weather CSVs...")
+        open_download(2025)
+        sys.exit(0)
     
     # Geocode step (from csv_geocode.py)
     if "--geocode" in sys.argv:
@@ -27,9 +34,9 @@ if __name__ == "__main__":
         print("Catastrophic error during weather download, canceling data generation")
         sys.exit(1)
 
-    #   #   #   #   #   #   #   #
-    #   Preprocessing Block     #
-    #   #   #   #   #   #   #   #
+    #   #   #   #   #   #   #   #   #
+    #   Crash Preprocessing Block   #
+    #   #   #   #   #   #   #   #   #
     
     rawCSV = "Dallas2025.csv"
 
@@ -39,3 +46,7 @@ if __name__ == "__main__":
     if not training_data:
         print("Catastrophic error during lookup, canceling data generation")
         sys.exit(1)
+
+    # Weather preprocessing step 
+    print("Preprocessing weather CSVs...")
+    preprocess_all_weather_csvs()
