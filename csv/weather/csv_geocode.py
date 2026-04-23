@@ -160,7 +160,7 @@ def drop_unnecessary_columns(df: pd.DataFrame) -> pd.DataFrame:
     Drop unnecessary columns from the geocoded dataframe.
     Removes: ICAO, LAT, LON, ELEV(M), BEGIN, END
     """
-    cols_to_drop = ["ICAO", "LAT", "LON", "ELEV(M)", "BEGIN", "END"]
+    cols_to_drop = ["ICAO", "ELEV(M)", "BEGIN", "END"]
     return df.drop(columns=[col for col in cols_to_drop if col in df.columns])
 
 

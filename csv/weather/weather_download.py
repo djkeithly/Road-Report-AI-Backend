@@ -12,7 +12,17 @@ from pathlib import Path
 
 import pandas as pd
 
+from weather.csv_geocode import _float_lat_lon
+
 NCEI_GLOBAL_HOURLY_ACCESS = "https://www.ncei.noaa.gov/data/global-hourly/access"
+
+STATIONS_CSV_COLUMNS = (
+    "name",
+    "lat",
+    "lon",
+    "closest_station",
+    "station_flags",
+)
 
 sucess_cities = []
 sucess_counties = []
@@ -120,6 +130,53 @@ def download_url_to_file(url: str, dest: Path) -> bool:
     return True
 
 
+def _place_name_to_closest_station_csv(place_name: str) -> str:
+    """Weather sidecar label: ``<name>`` for the place (city or county name)."""
+    n = str(place_name).strip()
+    return f"{n}" if n else ""
+
+
+def append_stations_csv_row(
+    stations_csv: Path,
+    *,
+    name: str,
+    lat: float | None,
+    lon: float | None,
+) -> None:
+    """
+    Append one row to ``stations.csv`` (created next to downloaded weather CSVs).
+    ``closest_station`` is ``<name>`` for the place label; ``station_flags`` is
+    1 meaning that this is a city or county with a station
+    """
+    place = str(name).strip()
+    row = {
+        "name": place,
+        "lat": lat if lat is not None else "",
+        "lon": lon if lon is not None else "",
+        "closest_station": _place_name_to_closest_station_csv(place),
+        "station_flags": 1,
+    }
+    stations_csv.parent.mkdir(parents=True, exist_ok=True)
+    new_df = pd.DataFrame([row], columns=list(STATIONS_CSV_COLUMNS))
+    if stations_csv.exists():
+        existing = pd.read_csv(
+            stations_csv,
+            dtype={"name": str, "closest_station": str},
+        )
+        for col in STATIONS_CSV_COLUMNS:
+            if col not in existing.columns:
+                existing[col] = ""
+        existing["closest_station"] = existing["closest_station"].astype(str).str.strip()
+        existing_names = set(existing["name"].astype(str).str.strip())
+        if place in existing_names:
+            return
+        combined = pd.concat([existing, new_df], ignore_index=True)
+        combined = combined.drop_duplicates(subset=["name"], keep="first")
+        combined.to_csv(stations_csv, index=False)
+    else:
+        new_df.to_csv(stations_csv, index=False)
+
+
 def download_station_year(
     cities: bool,
     station_id: str,
@@ -130,10 +187,13 @@ def download_station_year(
     base_url: str = NCEI_GLOBAL_HOURLY_ACCESS,
     county: str | None = None,
     city: str | None = None,
-) -> bool:
+) -> tuple[bool, bool]:
     """
-    Download one Global Hourly file. On failure, prints the required message and returns False.
-    On skip_if_exists and file present, returns True without downloading.
+    Download one Global Hourly file. On failure, prints the required message.
+
+    Returns:
+        ``(ok, downloaded_new_file)`` where ``downloaded_new_file`` is True only
+        when this call fetched and wrote the CSV (not when skipping or file existed).
     """
     url = global_hourly_csv_url(year, station_id, base=base_url)
     dest = out_dir
@@ -143,27 +203,28 @@ def download_station_year(
         dest = dest / f"{county}_{year}.csv"
 
     if dest.exists():
-        return True
-    
+        return True, False
+
     if county in sucess_counties and not cities:
         print(f"Skipping station {station_name} in {county} with station_id {station_id} for year {year} because county already has sucessful download.")
-        return True
-    
+        return True, False
+
     if city in sucess_cities and cities:
         print(f"Skipping station {station_name} in {city} with station_id {station_id} for year {year} because city already has sucessful download.")
-        return True
+        return True, False
 
     ok = download_url_to_file(url, dest)
     if not ok:
         print(
             f"Station {station_name} in {county if not cities else city} with station_id {station_id} could not be Downloaded."
         )
-    else:
-        if county and county not in sucess_counties and not cities:
-            sucess_counties.append(county)
-        if city and city not in sucess_cities and cities:
-            sucess_cities.append(city)
-    return ok
+        return False, False
+
+    if county and county not in sucess_counties and not cities:
+        sucess_counties.append(county)
+    if city and city not in sucess_cities and cities:
+        sucess_cities.append(city)
+    return True, True
 
 
 def create_weather_files(
@@ -187,6 +248,12 @@ def create_weather_files(
 
     If a download fails (HTTP error, I/O, etc.), prints:
     ``Station <name> with station_id <id> could not be Downloaded.``
+
+    After each successful new download (HTTP fetch in this run), appends one row to
+    ``<out_dir>/stations.csv`` when that ``name`` is not already listed: ``name``
+    (city or county label used for filenames), ``lat`` / ``lon`` from the deduped
+    ISD row, ``closest_station`` (place label from ``_place_name_to_closest_station_csv``),
+    and ``station_flags`` (unchanged from the module's registry format).
     """
 
     years = years if years is not None else [2025]
@@ -206,6 +273,7 @@ def create_weather_files(
 
     # One download per station_id per year (first row supplies the station name for messages).
     deduped = df.drop_duplicates(subset=["station_id"], keep="first")
+    stations_csv = out_path / "stations.csv"
 
     # To be used for logging
     total_files = 0
@@ -217,24 +285,39 @@ def create_weather_files(
 
         for _, row in deduped.iterrows():
             sid = str(row["station_id"])
-            name = row.get("STATION NAME", "")
+            station_label = row.get("STATION NAME", "")
             county = row.get("Geocoded_County", "")
             city = row.get("Geocoded_City", "")
-            if pd.isna(name):
-                name = ""
+            if pd.isna(station_label):
+                station_label = ""
             else:
-                name = str(name)
+                station_label = str(station_label)
 
-            download_station_year(
+            place_name = (
+                ("" if pd.isna(city) else str(city).strip())
+                if cities
+                else ("" if pd.isna(county) else str(county).strip())
+            )
+            lat = _float_lat_lon(row.get("LAT"))
+            lon = _float_lat_lon(row.get("LON"))
+
+            ok, downloaded_new = download_station_year(
                 cities,
                 sid,
-                name,
+                station_label,
                 year,
                 out_path,
                 base_url=base_url,
                 county=county,
                 city=city,
             )
+            if ok and downloaded_new:
+                append_stations_csv_row(
+                    stations_csv,
+                    name=place_name,
+                    lat=lat,
+                    lon=lon,
+                )
 
         print(f"Finished downloads for year {year}.")
         total_files +=  (len(sucess_cities) if cities else len(sucess_counties))
