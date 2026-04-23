@@ -50,6 +50,11 @@ def _tier_from_score(score_100: int) -> RiskTier:
     return "severe"
 
 
+def _clamp_score(value: float) -> float:
+    """Clamp component-style scores to a realistic 0-100 range."""
+    return round(max(1.0, min(99.0, value)), 2)
+
+
 def _build_components(
     *,
     latitude: float,
@@ -57,58 +62,101 @@ def _build_components(
     road_class: str | None,
     weather_condition: str | None,
     temperature_f: int | None,
+    query_time: datetime,
 ) -> tuple[RiskComponents, list[str]]:
     """Assemble explainable weighted components and warnings."""
     warnings: list[str] = []
+    road_class_label = (road_class or "UNKNOWN").upper()
+    hour = query_time.hour
+    is_weekend = query_time.weekday() >= 5
+    is_peak_commute = hour in {6, 7, 8, 9, 15, 16, 17, 18}
+    is_overnight = hour <= 4
+    corridor_variation = (fabs(latitude * 2.7) + fabs(longitude * 1.9)) % 18
+    geo_pressure = (fabs(latitude - longitude) * 2.4) % 16
+    road_class_pressure = {
+        "INTERSTATE": 22,
+        "TOLLWAY": 19,
+        "US & STATE HIGHWAYS": 15,
+        "FARM TO MARKET": 11,
+        "CITY STREET": 8,
+        "UNKNOWN": 6,
+    }.get(road_class_label, 6)
 
-    road_condition_score = 48.0 + (abs(latitude) % 7)
-    historical_score = 42.0 + (abs(longitude) % 9)
-
-    environmental_score = 40.0
-    if weather_condition:
-        condition = weather_condition.lower()
-        if "rain" in condition or "storm" in condition:
+    condition = (weather_condition or "").lower()
+    precipitation_penalty = 0
+    environmental_score = 16.0
+    if condition:
+        if "storm" in condition or "thunder" in condition:
+            environmental_score = 84.0
+            precipitation_penalty = 14
+        elif "snow" in condition or "ice" in condition:
+            environmental_score = 91.0
+            precipitation_penalty = 18
+        elif "rain" in condition or "sleet" in condition:
             environmental_score = 68.0
-        if "snow" in condition or "ice" in condition:
-            environmental_score = 79.0
+            precipitation_penalty = 10
+        elif "fog" in condition:
+            environmental_score = 58.0
+            precipitation_penalty = 8
+        elif "cloud" in condition:
+            environmental_score = 28.0
+        else:
+            environmental_score = 18.0
     elif temperature_f is None:
         warnings.append(
             "Weather data unavailable; environmental component estimated conservatively."
         )
+        environmental_score = 34.0
 
-    traffic_score = 45.0 + (fabs(latitude - longitude) % 8)
+    if temperature_f is not None:
+        if temperature_f <= 32:
+            environmental_score += 12
+            precipitation_penalty += 6
+        elif temperature_f >= 100:
+            environmental_score += 8
+        elif temperature_f >= 90:
+            environmental_score += 4
+
+    road_condition_score = 18.0 + road_class_pressure + corridor_variation + precipitation_penalty
+    historical_score = 20.0 + geo_pressure + (10 if is_peak_commute else 0) + (5 if is_weekend else 0)
+    traffic_score = 14.0 + road_class_pressure + (14 if is_peak_commute else 4) + ((fabs(latitude - longitude) * 3.1) % 14)
+    if is_overnight:
+        traffic_score -= 8
 
     components = RiskComponents(
         roadCondition=RiskComponent(
             name="Road Condition",
             key="C",
-            score=round(road_condition_score, 2),
+            score=_clamp_score(road_condition_score),
             maxPoints=25,
             weight=0.30,
             details=[
                 RiskDetail(
-                    label="Road Class", value=requested_value_or_dash(road_class)
+                    label="Road Class", value=requested_value_or_dash(road_class_label)
                 ),
-                RiskDetail(label="Surface Condition", value="Unknown"),
+                RiskDetail(
+                    label="Surface Condition",
+                    value=("Weather-adjusted estimate" if precipitation_penalty else "Nominal"),
+                ),
             ],
             source="txdot-cris-estimate",
         ),
         historical=RiskComponent(
             name="Historical Crash Pattern",
             key="A",
-            score=round(historical_score, 2),
+            score=_clamp_score(historical_score),
             maxPoints=25,
             weight=0.30,
             details=[
-                RiskDetail(label="Crash trend window", value="30-day baseline"),
-                RiskDetail(label="County profile", value="Estimated"),
+                RiskDetail(label="Crash trend window", value=("Peak commute profile" if is_peak_commute else "Standard profile")),
+                RiskDetail(label="County profile", value=("Weekend-adjusted" if is_weekend else "Weekday-adjusted")),
             ],
             source="txdot-cris-estimate",
         ),
         environmental=RiskComponent(
             name="Environmental Conditions",
             key="E",
-            score=round(environmental_score, 2),
+            score=_clamp_score(environmental_score),
             maxPoints=25,
             weight=0.25,
             details=[
@@ -129,12 +177,15 @@ def _build_components(
         traffic=RiskComponent(
             name="Traffic Pattern",
             key="T",
-            score=round(traffic_score, 2),
+            score=_clamp_score(traffic_score),
             maxPoints=25,
             weight=0.15,
             details=[
-                RiskDetail(label="Time profile", value="Current local window"),
-                RiskDetail(label="Congestion proxy", value="Estimated"),
+                RiskDetail(
+                    label="Time profile",
+                    value=("Peak commute" if is_peak_commute else "Overnight" if is_overnight else "Standard daytime"),
+                ),
+                RiskDetail(label="Congestion proxy", value=requested_value_or_dash(road_class_label)),
             ],
             source="model-estimate",
         ),
@@ -274,6 +325,36 @@ def _score_from_components(components: RiskComponents) -> float:
     score_100 = sum(component_scores)
     normalized = max(0.0, min(1.0, score_100 / 100))
     return normalized
+
+
+def _normalize_model_score(
+    *,
+    model_prob: float,
+    min_bound: float,
+    max_bound: float,
+    heuristic_score: float,
+) -> tuple[float, str]:
+    """Convert model probability to display score, falling back when bounds collapse."""
+    spread = max_bound - min_bound
+    if spread < 1e-6:
+        return heuristic_score, "collapsed_bounds"
+
+    padding = spread * 0.10
+    adjusted_min = min_bound - padding
+    adjusted_max = max_bound + padding
+
+    if adjusted_max <= adjusted_min:
+        return heuristic_score, "invalid_bounds"
+
+    normalized_score = (model_prob - adjusted_min) / (adjusted_max - adjusted_min)
+    normalized_score = max(0.01, min(1.0, normalized_score))
+    return normalized_score, "model"
+
+
+def _blend_scores(*, model_score: float, heuristic_score: float) -> float:
+    """Blend model and heuristic scores to avoid unstable or overly flat outputs."""
+    blended = (model_score * 0.65) + (heuristic_score * 0.35)
+    return max(0.01, min(1.0, blended))
 
 
 @lru_cache(maxsize=1)
@@ -604,7 +685,7 @@ def get_model_runtime_metadata() -> dict[str, str | int | float | bool]:
 
 
 async def predict_risk(request: RiskRequest) -> RiskResponse:
-    """Predict crash risk using Inverted Min-Max Normalized Logistic Regression."""
+    """Predict crash risk using model output with heuristic fallback when needed."""
     warnings: list[str] = []
     weather = get_fallback_weather_snapshot()
     try:
@@ -626,6 +707,7 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
         road_class=inferred_road_class,
         weather_condition=weather_condition,
         temperature_f=weather.temperature_f,
+        query_time=query_time,
     )
     warnings.extend(component_warnings)
 
@@ -641,30 +723,22 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
     )
 
     if model_prob is not None and min_bound is not None and max_bound is not None:
-        if max_bound - min_bound < 1e-6:
-            padding = 0.05
-        else:
-            padding = (max_bound - min_bound) * 0.10
-
-        adjusted_min = min_bound - padding
-        adjusted_max = max_bound + padding
-
-        if adjusted_max > adjusted_min:
-            # INVERTED FORMULA: Subtract from 1.0
-            # Lower probability maps to a Higher risk score
-            normalized_score = 1.0 - (
-                (model_prob - adjusted_min) / (adjusted_max - adjusted_min)
+        normalized_model_score, score_source = _normalize_model_score(
+            model_prob=model_prob,
+            min_bound=min_bound,
+            max_bound=max_bound,
+            heuristic_score=heuristic_score,
+        )
+        if score_source == "model":
+            risk_score = _blend_scores(
+                model_score=normalized_model_score,
+                heuristic_score=heuristic_score,
             )
         else:
-            normalized_score = 0.50
-
-        # Enforce strict 1% to 100% boundaries
-        risk_score = max(0.01, min(1.0, normalized_score))
-
-        warnings.append(
-            f"Logistic Regression Probability: {model_prob:.6e} "
-            f"(Inverted Normalization from live bounds {adjusted_min:.6e} - {adjusted_max:.6e})."
-        )
+            risk_score = heuristic_score
+            warnings.append(
+                "Model normalization bounds were too narrow; using heuristic fallback scoring."
+            )
     else:
         warnings.append(
             "Model artifact unavailable; using deterministic fallback scoring."
