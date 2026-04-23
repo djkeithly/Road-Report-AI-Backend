@@ -237,7 +237,7 @@ def create_weather_files(
     years: list[int] | None = None,
     out_dir: str | Path = "weather_csvs",
     base_url: str = NCEI_GLOBAL_HOURLY_ACCESS,
-) -> None:
+) -> bool:
     """
     Read ``src`` (default ``geocoded.csv`` next to this module), optionally restrict
     to rows whose ``Geocoded_County`` matches ``counties``, then for each distinct
@@ -277,6 +277,7 @@ def create_weather_files(
 
     # To be used for logging
     total_files = 0
+    stations_added = 0
 
     for year in years:
         # Reset sucess lists
@@ -318,12 +319,20 @@ def create_weather_files(
                     lat=lat,
                     lon=lon,
                 )
+                stations_added += 1
+
 
         print(f"Finished downloads for year {year}.")
         total_files +=  (len(sucess_cities) if cities else len(sucess_counties))
     
+    if(stations_added == 0):
+        print("No stations were added, catastrophic error, canceling data generation")
+        return False
+
     if cities:
         print(f"Sucessfully downloaded weather data for {len(sucess_cities)} cities")
     else:
         print(f"Successfully downloaded weather data for {len(sucess_counties)} counties")
     print(f"Total files downloaded: {total_files}")
+
+    return True

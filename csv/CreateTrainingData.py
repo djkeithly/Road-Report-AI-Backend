@@ -22,7 +22,10 @@ if __name__ == "__main__":
 
     # Download step (from weather_download.py)
     print("Downloading weather files...")
-    create_weather_files(ctry=ctry, state=state, counties=counties, cities=cities, years=years)
+    training_data = create_weather_files(ctry=ctry, state=state, counties=counties, cities=cities, years=years)
+    if not training_data:
+        print("Catastrophic error during weather download, canceling data generation")
+        sys.exit(1)
 
     #   #   #   #   #   #   #   #
     #   Preprocessing Block     #
@@ -32,4 +35,7 @@ if __name__ == "__main__":
 
     # Lookup step (from csv_lookup.py)
     print(f"Looking up places from {rawCSV}...")
-    lookup(src_path=rawCSV, cities=cities)
+    training_data = lookup(src_path=rawCSV, cities=cities)
+    if not training_data:
+        print("Catastrophic error during lookup, canceling data generation")
+        sys.exit(1)
