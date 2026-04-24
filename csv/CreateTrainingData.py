@@ -6,6 +6,7 @@ from csv_lookup import lookup
 from weather.csv_weather import preprocess_all_weather_csvs
 from weather.open_download import open_download
 from weather.open_preprocessing import preprocess_open_meteo_data
+from csv_editing import training_data_production
 
 # Rare manual entry point.
 # Transforms a file called isd-history.csv in the same directory into geocoded.csv, which is used by other scripts.
@@ -15,20 +16,20 @@ if __name__ == "__main__":
     ctry = "US"
     years = [2025]  # List of years to download and preprocess weather data for. Adjust as needed.
     cities = True
-
-    if cities:
-        print("Preprocessing station list...")
-        preprocess_open_meteo_data(years[0])  # Preprocess the Open-Meteo CSV for the first year (assumes same cities for all years).
-        sys.exit(0)
+    rawCSV = "Dallas2025.csv"
 
     #   #   #   #   #   #   #   #   #
     #   Crash Preprocessing Block   #
     #   #   #   #   #   #   #   #   #
-    
-    rawCSV = "Dallas2025.csv"
 
     print("Looking up cities from raw CSV...")
     lookup(rawCSV, cities=cities)
 
     print("Preprocessing weather CSVs...")
     open_download(2025)
+
+    print("Preprocessing station list...")
+    preprocess_open_meteo_data(years[0])  # Preprocess the Open-Meteo CSV for the first year (assumes same cities for all years).
+
+    print("Creating training data...")
+    training_data_production(rawCSV)
