@@ -251,8 +251,6 @@ def write_cities_csv(
 def lookup(
     src_path: str | Path,
     cities: bool,
-    *,
-    stations_csv: str | Path = DEFAULT_STATIONS_CSV,
 ) -> bool:
     """
     Print unique place names from ``src_path``, geocode each (Nominatim),

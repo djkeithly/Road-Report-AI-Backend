@@ -1,9 +1,11 @@
+import sys
+
 from weather.csv_geocode import geocode
 from weather.weather_download import create_weather_files
 from csv_lookup import lookup
 from weather.csv_weather import preprocess_all_weather_csvs
 from weather.open_download import open_download
-import sys
+from weather.open_preprocessing import preprocess_open_meteo_data
 
 # Rare manual entry point.
 # Transforms a file called isd-history.csv in the same directory into geocoded.csv, which is used by other scripts.
@@ -11,28 +13,13 @@ import sys
 if __name__ == "__main__":
     state = "TX"
     ctry = "US"
-
-    if "--help" in sys.argv:
-        print("Preprocessing weather CSVs...")
-        open_download(2025)
-        sys.exit(0)
-    
-    # Geocode step (from csv_geocode.py)
-    if "--geocode" in sys.argv:
-        print(f"Geocoding {ctry} {state}...")
-        geocode(ctry=ctry, state=state)
-
-    # Setup for download step
+    years = [2025]  # List of years to download and preprocess weather data for. Adjust as needed.
     cities = True
-    counties = ["Dallas"]
-    years = [ 2025]
 
-    # Download step (from weather_download.py)
-    print("Downloading weather files...")
-    training_data = create_weather_files(ctry=ctry, state=state, counties=counties, cities=cities, years=years)
-    if not training_data:
-        print("Catastrophic error during weather download, canceling data generation")
-        sys.exit(1)
+    if cities:
+        print("Preprocessing station list...")
+        preprocess_open_meteo_data(years[0])  # Preprocess the Open-Meteo CSV for the first year (assumes same cities for all years).
+        sys.exit(0)
 
     #   #   #   #   #   #   #   #   #
     #   Crash Preprocessing Block   #
@@ -40,13 +27,8 @@ if __name__ == "__main__":
     
     rawCSV = "Dallas2025.csv"
 
-    # Lookup step (from csv_lookup.py)
-    print(f"Looking up places from {rawCSV}...")
-    training_data = lookup(src_path=rawCSV, cities=cities)
-    if not training_data:
-        print("Catastrophic error during lookup, canceling data generation")
-        sys.exit(1)
+    print("Looking up cities from raw CSV...")
+    lookup(rawCSV, cities=cities)
 
-    # Weather preprocessing step 
     print("Preprocessing weather CSVs...")
-    preprocess_all_weather_csvs()
+    open_download(2025)
