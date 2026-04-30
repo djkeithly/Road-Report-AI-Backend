@@ -1,9 +1,5 @@
 import sys
-
-from weather.csv_geocode import geocode
-from weather.weather_download import create_weather_files
 from csv_lookup import lookup
-from weather.csv_weather import preprocess_all_weather_csvs
 from weather.open_download import open_download
 from weather.open_preprocessing import preprocess_open_meteo_data
 from csv_editing import training_data_production
@@ -36,7 +32,7 @@ if __name__ == "__main__":
     open_download(2025)
 
     print("Preprocessing station list...")
-    preprocess_open_meteo_data(years[0])  # Preprocess the Open-Meteo CSV for the first year (assumes same cities for all years).
+    preprocess_open_meteo_data(years[0])
 
     print("Creating training data...")
     training_data_production(rawCSV)

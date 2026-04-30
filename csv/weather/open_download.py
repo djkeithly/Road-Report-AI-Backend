@@ -16,11 +16,11 @@ OPEN_METEO_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
 
 __all__ = ["get_city_list", "open_download"]
 
-
+# No need for a global output path since this module writes one file per city with a predictable name.
 def _script_dir() -> Path:
 	return Path(__file__).resolve().parent
 
-
+# Windows file names cannot contain these characters, so replace them with underscores to avoid errors.
 def _safe_name_for_file(name: str) -> str:
 	"""Strip and replace characters that are invalid in file names (Windows-safe)."""
 	s = name.strip()
