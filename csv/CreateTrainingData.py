@@ -7,6 +7,7 @@ from weather.csv_weather import preprocess_all_weather_csvs
 from weather.open_download import open_download
 from weather.open_preprocessing import preprocess_open_meteo_data
 from csv_editing import training_data_production
+from road_geocaching import create_section_data, attach_average_coordinates
 
 # Rare manual entry point.
 # Transforms a file called isd-history.csv in the same directory into geocoded.csv, which is used by other scripts.
@@ -17,6 +18,12 @@ if __name__ == "__main__":
     years = [2025]  # List of years to download and preprocess weather data for. Adjust as needed.
     cities = True
     rawCSV = "Dallas2025.csv"
+
+    if "--road" in sys.argv:
+        print("Creating road section data...")
+        create_section_data(rawCSV)
+        attach_average_coordinates(rawCSV)
+        sys.exit(0)
 
     #   #   #   #   #   #   #   #   #
     #   Crash Preprocessing Block   #

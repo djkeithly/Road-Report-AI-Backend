@@ -229,11 +229,19 @@ def identify_and_replace_non_critical_roads(filepath, crash_threshold=12):
                 .size()
             )
             non_critical_pairs = road_counts[road_counts < crash_threshold].index.tolist()
-            mask = pd.Series(False, index=df_modified.index)
-            for name, sec in non_critical_pairs:
-                m = df_modified["Street Name"].notna() & (df_modified["Street Name"] == name)
-                m &= df_modified["Section"].map(_normalize_section_value) == sec
-                mask |= m
+            # One vectorized pass: avoid per-pair full-column ``.map(_normalize_section_value)``
+            # (that was O(len(non_critical_pairs) * n_rows) and dominated runtime).
+            if not non_critical_pairs:
+                mask = pd.Series(False, index=df_modified.index)
+            else:
+                pair_idx = pd.MultiIndex.from_arrays(
+                    [df_modified["Street Name"].to_numpy(), sec_norm.to_numpy()],
+                )
+                nc_idx = pd.MultiIndex.from_tuples(non_critical_pairs)
+                mask = pd.Series(
+                    valid_street.to_numpy() & pair_idx.isin(nc_idx),
+                    index=df_modified.index,
+                )
             df_modified.loc[mask, "Street Name"] = "Non Critical Road"
             df_modified.loc[mask, "Section"] = "No Data"
             non_critical_roads = [f"{n} | sec={s!r}" for n, s in non_critical_pairs]
