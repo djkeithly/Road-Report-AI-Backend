@@ -32,3 +32,16 @@ class UserReportCreateResponse(BaseModel):
     message: str = "Report saved"
     created_at: datetime = Field(alias="createdAt")
     model_config = ConfigDict(populate_by_name=True)
+
+
+class UserReportResponse(BaseModel):
+    """Stored roadway issue report returned to frontend consumers."""
+
+    id: int
+    road_name: str = Field(alias="roadName")
+    issue_type: ReportIssueType = Field(alias="issueType")
+    description: str
+    latitude: float | None = None
+    longitude: float | None = None
+    created_at: datetime = Field(alias="createdAt")
+    model_config = ConfigDict(populate_by_name=True)

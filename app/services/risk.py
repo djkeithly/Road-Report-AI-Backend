@@ -15,16 +15,10 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from app.config import get_settings
-from app.schemas.risk import (
-    RiskComponent,
-    RiskComponents,
-    RiskCoordinates,
-    RiskDetail,
-    RiskRequest,
-    RiskResponse,
-    RiskTier,
-)
-from app.services.weather import get_fallback_weather_snapshot, get_weather_snapshot
+from app.schemas.risk import (RiskComponent, RiskComponents, RiskCoordinates,
+                              RiskDetail, RiskRequest, RiskResponse, RiskTier)
+from app.services.weather import (get_fallback_weather_snapshot,
+                                  get_weather_snapshot)
 
 
 # 1. Define the Model
@@ -35,6 +29,26 @@ class LogisticRegression(nn.Module):
 
     def forward(self, x):
         return self.linear(x)
+
+
+def calculate_continuous_risk(predicted_class: int, probability: float) -> float:
+    """
+    Maps the model's class and confidence into a continuous 0.0 to 1.0 risk scale 
+    where 1.0 is the MOST risky.
+    """
+    if predicted_class == 1:
+        return probability
+    return 1.0 - probability
+
+
+def _extract_and_map_risk(raw_model_output: float) -> float:
+    """
+    Parses raw sigmoid output (which acts as probability of Class 0 / Safe) 
+    into a standard continuous risk score.
+    """
+    predicted_class = 0 if raw_model_output >= 0.5 else 1
+    confidence = raw_model_output if predicted_class == 0 else 1.0 - raw_model_output
+    return calculate_continuous_risk(predicted_class, confidence)
 
 
 def _tier_from_score(score_100: int) -> RiskTier:
@@ -496,7 +510,8 @@ def _infer_model_probability(
     tensor = torch.tensor(aligned.to_numpy(dtype=np.float32))
 
     with torch.no_grad():
-        probability = float(torch.sigmoid(model(tensor)).item())
+        raw_prob = float(torch.sigmoid(model(tensor)).item())
+        probability = _extract_and_map_risk(raw_prob)
 
     # 2. Dynamically calculate bounds using LIVE time, month, and city
     crash_time_int = int((query_time.hour * 100) + query_time.minute)
@@ -544,8 +559,8 @@ def _infer_model_probability(
         custom_tensor = torch.tensor(custom_aligned.to_numpy(dtype=np.float32))
 
         with torch.no_grad():
-            prob = float(torch.sigmoid(model(custom_tensor)).item())
-            cutoffs.append(prob)
+            raw_prob = float(torch.sigmoid(model(custom_tensor)).item())
+            cutoffs.append(_extract_and_map_risk(raw_prob))
 
     min_bound = min(cutoffs)
     max_bound = max(cutoffs)
