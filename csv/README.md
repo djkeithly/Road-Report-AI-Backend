@@ -15,6 +15,9 @@ py csv/CreateTrainingData.py
 (5) If the center of roads roads are needed, add --road to the end of the command in step 3:
 
 py csv/CreateTrainingData.py --road
+
+#   #   #   #   #   #   #   #   #   #   #   #
+#               Variable List               #
 #   #   #   #   #   #   #   #   #   #   #   #
 
 Main file to edit to customize what data is generated is CreateTrainingData.py. No other file should need to be edited
