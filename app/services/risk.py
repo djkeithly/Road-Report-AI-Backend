@@ -1,9 +1,10 @@
 """Risk prediction service with weather enrichment and scoring scaffold."""
 
 import json
+import math
 import pickle
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from math import fabs
 from pathlib import Path
@@ -15,10 +16,19 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from app.config import get_settings
-from app.schemas.risk import (RiskComponent, RiskComponents, RiskCoordinates,
-                              RiskDetail, RiskRequest, RiskResponse, RiskTier)
-from app.services.weather import (get_fallback_weather_snapshot,
-                                  get_weather_snapshot)
+from app.models.user_report import UserReportRecord
+from app.schemas.risk import (
+    RiskComponent,
+    RiskComponents,
+    RiskCoordinates,
+    RiskDetail,
+    RiskRequest,
+    RiskResponse,
+    RiskTier,
+)
+from app.services.weather import get_fallback_weather_snapshot, get_weather_snapshot
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 # 1. Define the Model
@@ -33,7 +43,7 @@ class LogisticRegression(nn.Module):
 
 def calculate_continuous_risk(predicted_class: int, probability: float) -> float:
     """
-    Maps the model's class and confidence into a continuous 0.0 to 1.0 risk scale 
+    Maps the model's class and confidence into a continuous 0.0 to 1.0 risk scale
     where 1.0 is the MOST risky.
     """
     if predicted_class == 1:
@@ -43,7 +53,7 @@ def calculate_continuous_risk(predicted_class: int, probability: float) -> float
 
 def _extract_and_map_risk(raw_model_output: float) -> float:
     """
-    Parses raw sigmoid output (which acts as probability of Class 0 / Safe) 
+    Parses raw sigmoid output (which acts as probability of Class 0 / Safe)
     into a standard continuous risk score.
     """
     predicted_class = 0 if raw_model_output >= 0.5 else 1
@@ -131,9 +141,18 @@ def _build_components(
         elif temperature_f >= 90:
             environmental_score += 4
 
-    road_condition_score = 18.0 + road_class_pressure + corridor_variation + precipitation_penalty
-    historical_score = 20.0 + geo_pressure + (10 if is_peak_commute else 0) + (5 if is_weekend else 0)
-    traffic_score = 14.0 + road_class_pressure + (14 if is_peak_commute else 4) + ((fabs(latitude - longitude) * 3.1) % 14)
+    road_condition_score = (
+        18.0 + road_class_pressure + corridor_variation + precipitation_penalty
+    )
+    historical_score = (
+        20.0 + geo_pressure + (10 if is_peak_commute else 0) + (5 if is_weekend else 0)
+    )
+    traffic_score = (
+        14.0
+        + road_class_pressure
+        + (14 if is_peak_commute else 4)
+        + ((fabs(latitude - longitude) * 3.1) % 14)
+    )
     if is_overnight:
         traffic_score -= 8
 
@@ -150,7 +169,11 @@ def _build_components(
                 ),
                 RiskDetail(
                     label="Surface Condition",
-                    value=("Weather-adjusted estimate" if precipitation_penalty else "Nominal"),
+                    value=(
+                        "Weather-adjusted estimate"
+                        if precipitation_penalty
+                        else "Nominal"
+                    ),
                 ),
             ],
             source="txdot-cris-estimate",
@@ -162,8 +185,18 @@ def _build_components(
             maxPoints=25,
             weight=0.30,
             details=[
-                RiskDetail(label="Crash trend window", value=("Peak commute profile" if is_peak_commute else "Standard profile")),
-                RiskDetail(label="County profile", value=("Weekend-adjusted" if is_weekend else "Weekday-adjusted")),
+                RiskDetail(
+                    label="Crash trend window",
+                    value=(
+                        "Peak commute profile"
+                        if is_peak_commute
+                        else "Standard profile"
+                    ),
+                ),
+                RiskDetail(
+                    label="County profile",
+                    value=("Weekend-adjusted" if is_weekend else "Weekday-adjusted"),
+                ),
             ],
             source="txdot-cris-estimate",
         ),
@@ -197,9 +230,16 @@ def _build_components(
             details=[
                 RiskDetail(
                     label="Time profile",
-                    value=("Peak commute" if is_peak_commute else "Overnight" if is_overnight else "Standard daytime"),
+                    value=(
+                        "Peak commute"
+                        if is_peak_commute
+                        else "Overnight" if is_overnight else "Standard daytime"
+                    ),
                 ),
-                RiskDetail(label="Congestion proxy", value=requested_value_or_dash(road_class_label)),
+                RiskDetail(
+                    label="Congestion proxy",
+                    value=requested_value_or_dash(road_class_label),
+                ),
             ],
             source="model-estimate",
         ),
@@ -256,7 +296,11 @@ def _token_set(value: str) -> set[str]:
         "OF",
         "THE",
     }
-    return {token for token in _normalize_road_text(value).split() if token and token not in stop_words}
+    return {
+        token
+        for token in _normalize_road_text(value).split()
+        if token and token not in stop_words
+    }
 
 
 def _best_fuzzy_road_match(candidate: str, known: set[str]) -> str | None:
@@ -699,7 +743,7 @@ def get_model_runtime_metadata() -> dict[str, str | int | float | bool]:
     return metadata
 
 
-async def predict_risk(request: RiskRequest) -> RiskResponse:
+async def predict_risk(request: RiskRequest, db: AsyncSession) -> RiskResponse:
     """Predict crash risk using model output with heuristic fallback when needed."""
     warnings: list[str] = []
     weather = get_fallback_weather_snapshot()
@@ -759,6 +803,44 @@ async def predict_risk(request: RiskRequest) -> RiskResponse:
             "Model artifact unavailable; using deterministic fallback scoring."
         )
         risk_score = heuristic_score
+
+    # Calculate 1-mile bounding box around the requested coordinates
+    lat = request.latitude
+    lon = request.longitude
+    lat_delta = 1.0 / 69.0
+    lon_delta = (
+        1.0 / (69.0 * math.cos(math.radians(lat)))
+        if math.cos(math.radians(lat)) != 0
+        else 0
+    )
+
+    road_needle = f"%{(request.road_name or '').strip()}%"
+    one_hour_ago = query_time - timedelta(hours=1)
+
+    # Query local user reports within the ~1 mile radius FROM THE LAST HOUR
+    stmt = select(UserReportRecord).where(
+        UserReportRecord.road_name.ilike(road_needle),
+        UserReportRecord.latitude.between(lat - lat_delta, lat + lat_delta),
+        UserReportRecord.longitude.between(lon - lon_delta, lon + lon_delta),
+        UserReportRecord.created_at >= one_hour_ago,
+    )
+    result = await db.execute(stmt)
+    reports = result.scalars().all()
+
+    # Extract the distinct issue types
+    distinct_issues = {report.issue_type for report in reports}
+    n = len(distinct_issues)
+
+    # Apply the (n + 1)th root if there are any distinct reports
+    if n > 0:
+        risk_score = risk_score ** (1.0 / (n + 1.0))
+
+        # Format a nice warning message for the UI
+        issues_str = ", ".join(sorted(distinct_issues)).replace("_", " ")
+        warnings.append(
+            f"Risk score elevated by {len(reports)} community report(s) in the last hour "
+            f"spanning {n} distinct hazard type(s) ({issues_str})."
+        )
 
     score_100 = int(round(risk_score * 100))
     tier = _tier_from_score(score_100)

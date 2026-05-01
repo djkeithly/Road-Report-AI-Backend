@@ -2,11 +2,16 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query
-
+from app.api.deps import get_db
 from app.schemas.health import ModelMetadataResponse
 from app.schemas.risk import RiskRequest, RiskResponse
-from app.services.risk import get_model_runtime_metadata, get_road_suggestions, predict_risk
+from app.services.risk import (
+    get_model_runtime_metadata,
+    get_road_suggestions,
+    predict_risk,
+)
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(prefix="/risk", tags=["risk"])
 
@@ -22,7 +27,9 @@ def _metadata_payload(metadata: dict[str, str | int | float | bool]) -> dict:
         "model_type": str(metadata.get("model_type", "")),
         "model_version": str(metadata.get("model_version", "")),
         "input_size": (
-            int(metadata["input_size"]) if metadata.get("input_size") is not None else None
+            int(metadata["input_size"])
+            if metadata.get("input_size") is not None
+            else None
         ),
         "known_road_count": (
             int(metadata["known_road_count"])
@@ -30,31 +37,43 @@ def _metadata_payload(metadata: dict[str, str | int | float | bool]) -> dict:
             else None
         ),
         "rows_used": (
-            int(metadata["rows_used"]) if metadata.get("rows_used") is not None else None
+            int(metadata["rows_used"])
+            if metadata.get("rows_used") is not None
+            else None
         ),
         "threshold": (
-            float(metadata["threshold"]) if metadata.get("threshold") is not None else None
+            float(metadata["threshold"])
+            if metadata.get("threshold") is not None
+            else None
         ),
         "accuracy": (
-            float(metadata["accuracy"]) if metadata.get("accuracy") is not None else None
+            float(metadata["accuracy"])
+            if metadata.get("accuracy") is not None
+            else None
         ),
         "precision": (
-            float(metadata["precision"]) if metadata.get("precision") is not None else None
+            float(metadata["precision"])
+            if metadata.get("precision") is not None
+            else None
         ),
-        "recall": float(metadata["recall"]) if metadata.get("recall") is not None else None,
+        "recall": (
+            float(metadata["recall"]) if metadata.get("recall") is not None else None
+        ),
         "f1": float(metadata["f1"]) if metadata.get("f1") is not None else None,
     }
 
 
 @router.post("/predict", response_model=RiskResponse)
-async def get_risk_score(request: RiskRequest) -> RiskResponse:
+async def get_risk_score(
+    request: RiskRequest, db: AsyncSession = Depends(get_db)
+) -> RiskResponse:
     """
     Get crash risk score for a location.
 
     Accepts coordinates (and optional context) and returns a 0–1 risk score.
     Non-blocking; delegates to dedicated service for inference.
     """
-    return await predict_risk(request)
+    return await predict_risk(request, db)
 
 
 @router.get("/model-metrics", response_model=ModelMetadataResponse)
