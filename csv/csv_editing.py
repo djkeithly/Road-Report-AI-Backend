@@ -1,10 +1,18 @@
-## This file will create negative samples for the model by creating new rows that represnent non-crash events. 
+## This file will create negative samples for the model by creating new rows that represnent non-crash events.
 # It will use the existing data to create these samples, ensuring that they are realistic and varied.
+#
+# Importable entry point: ``training_data_production(crash_data_source)``.
+
+from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+
 import pandas as pd
 from datetime import datetime, timedelta
 import math
+import re
 
 #   #   #   #   #   #   #   #   #   #   #   #
 #               Step 1 Functions            #
@@ -13,16 +21,69 @@ import math
 # A basic function that takes a CSV file and adds a row called Crash and sets all the values in the file to 1, indicating a crash
 # This allows for negative sampling, or the ability to differentiate between crash and non crash events in the dataset
 # This will be critical to actually training an AI model
+def _extract_hour_bucket(value):
+    """Return hour as string without leading zeros (e.g., '01:00 - 01:59' -> '1')."""
+    if pd.isna(value):
+        return value
+
+    text = str(value).strip()
+    match = re.match(r"^(\d{1,2})", text)
+    if not match:
+        return text
+
+    return str(int(match.group(1)))
+
+
+def _normalize_section_value(val) -> str:
+    """Section for grouping and keys: empty string means no section / not applicable."""
+    if pd.isna(val):
+        return ""
+    if isinstance(val, bool):
+        return str(val).strip()
+    if isinstance(val, (int, float)):
+        if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+            return ""
+        if isinstance(val, float) and val == int(val):
+            return str(int(val))
+        if isinstance(val, int):
+            return str(val)
+        return str(val).strip()
+    else:
+        s = str(val).strip()
+    if s.lower() in ("no data", "nan", ""):
+        return ""
+    try:
+        f = float(s)
+        if not math.isnan(f) and f == int(f):
+            return str(int(f))
+    except ValueError:
+        pass
+    return s
+
+
+def _event_key_street_section_date_hour(row) -> tuple:
+    """Crash/negative dedupe key: (street upper, normalized section, date, hour bucket)."""
+    sn = row["Street Name"] if "Street Name" in row.index else None
+    street = str(sn).strip().upper() if sn is not None and pd.notna(sn) else ""
+    if "Section" in row.index:
+        sec = _normalize_section_value(row["Section"]).upper()
+    else:
+        sec = ""
+    hour = _extract_hour_bucket(row["Hour of Day"])
+    return (street, sec, row["Crash Date"], hour)
+
+
 def add_crash_column(filepath):
     """
     Add a 'Crash' column to the CSV file with all values set to 1.
     This indicates that all rows in the dataset represent crash events.
-    
+    Removes a 'Crash ID' column if present.
+
     Args:
         filepath (str): Path to the input CSV file
         output_filename (str): Optional custom output filename/path.
             If None, the input file is updated in place.
-        
+
     Returns:
         dict: Dictionary containing:
             - 'total_rows': Number of rows processed
@@ -31,7 +92,12 @@ def add_crash_column(filepath):
     try:
         # Read the CSV file
         df = pd.read_csv(filepath)
-        
+
+        # Clean up step
+        df = df.drop(columns=["Crash ID", "Average Daily Traffic Amount"], errors="ignore")
+        if "Hour of Day" in df.columns:
+            df["Hour of Day"] = df["Hour of Day"].apply(_extract_hour_bucket)
+
         # Add the 'Crash' column with all values set to 1
         df['Crash'] = 1
         
@@ -54,14 +120,54 @@ def add_crash_column(filepath):
     except Exception as e:
         print(f"Error adding 'Crash' column: {e}")
         return None
-    
+
 #   #   #   #   #   #   #   #   #   #   #   #
 #               Step 2 Functions            #
 #   #   #   #   #   #   #   #   #   #   #   #
 
+def combine_street_name_and_segment(filepath):
+    """
+    Combine 'Street Name' and 'Section' into a single 'Street Name' column
+    in the format '<Street Name> <Section>', then drop the 'Section' column.
+    If 'Section' is 'No Data', the street name is left unchanged for that row.
+
+    Args:
+        filepath (str): Path to the input CSV file.
+    """
+    try:
+        df = pd.read_csv(filepath)
+
+        if "Street Name" in df.columns and "Section" in df.columns:
+            # Only append section where it has meaningful data
+            mask = df["Section"].astype(str) != "No Data"
+            df.loc[mask, "Street Name"] = (
+                df.loc[mask, "Street Name"].astype(str)
+                + " S"
+                + df.loc[mask, "Section"].astype(str)
+            )
+            df = df.drop(columns=["Section"])
+
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            if os.path.isabs(filepath):
+                output_file = filepath
+            else:
+                output_file = os.path.join(script_dir, filepath)
+
+            df.to_csv(output_file, index=False)
+        else:
+            print("Columns 'Street Name' and/or 'Section' not found; no changes made.")
+
+    except Exception as e:
+        print(f"Error combining 'Street Name' and 'Section': {e}")
+
+#   #   #   #   #   #   #   #   #   #   #   #
+#               Step 3 Functions            #
+#   #   #   #   #   #   #   #   #   #   #   #
+
 def get_average_crashes_per_road(filepath):
     """
-    Calculate the average number of crashes per road in the dataset.
+    Calculate the average number of crashes per road (or per road + section when
+    ``Section`` is present) in the dataset.
     
     Args:
         filepath (str): Path to the input CSV file
@@ -71,7 +177,17 @@ def get_average_crashes_per_road(filepath):
     """
     try:
         df = pd.read_csv(filepath)
-        road_counts = df['Street Name'].value_counts()
+        if "Section" in df.columns:
+            valid = df["Street Name"].notna()
+            sec_norm = df["Section"].map(_normalize_section_value)
+            road_counts = (
+                df.loc[valid]
+                .assign(_sec_norm=sec_norm.loc[valid])
+                .groupby(["Street Name", "_sec_norm"], dropna=False)
+                .size()
+            )
+        else:
+            road_counts = df.loc[df["Street Name"].notna(), "Street Name"].value_counts()
         average_crashes = math.ceil(road_counts.mean())
         return average_crashes
     except Exception as e:
@@ -99,18 +215,42 @@ def identify_and_replace_non_critical_roads(filepath, crash_threshold=12):
     try:
         # Read the CSV file
         df = pd.read_csv(filepath)
-        
-        # Count crashes per road
-        road_counts = df['Street Name'].value_counts()
-        
-        # Identify roads with less than threshold crashes
-        non_critical_roads = road_counts[road_counts < crash_threshold].index.tolist()
-        
-        # Create a copy of the dataframe
+
         df_modified = df.copy()
-        
-        # Replace non-critical roads with 'Non Critical Road'
-        df_modified.loc[df_modified['Street Name'].isin(non_critical_roads), 'Street Name'] = 'Non Critical Road'
+        if "Section" in df_modified.columns:
+            # Rows with missing street name must be excluded from grouping: a (nan, sec)
+            # MultiIndex key breaks ``road_counts[key]`` lookups (NaN != NaN).
+            valid_street = df_modified["Street Name"].notna()
+            sec_norm = df_modified["Section"].map(_normalize_section_value)
+            road_counts = (
+                df_modified.loc[valid_street]
+                .assign(_sec_norm=sec_norm.loc[valid_street])
+                .groupby(["Street Name", "_sec_norm"], dropna=False)
+                .size()
+            )
+            non_critical_pairs = road_counts[road_counts < crash_threshold].index.tolist()
+            # One vectorized pass: avoid per-pair full-column ``.map(_normalize_section_value)``
+            # (that was O(len(non_critical_pairs) * n_rows) and dominated runtime).
+            if not non_critical_pairs:
+                mask = pd.Series(False, index=df_modified.index)
+            else:
+                pair_idx = pd.MultiIndex.from_arrays(
+                    [df_modified["Street Name"].to_numpy(), sec_norm.to_numpy()],
+                )
+                nc_idx = pd.MultiIndex.from_tuples(non_critical_pairs)
+                mask = pd.Series(
+                    valid_street.to_numpy() & pair_idx.isin(nc_idx),
+                    index=df_modified.index,
+                )
+            df_modified.loc[mask, "Street Name"] = "Non Critical Road"
+            df_modified.loc[mask, "Section"] = "No Data"
+            non_critical_roads = [f"{n} | sec={s!r}" for n, s in non_critical_pairs]
+        else:
+            road_counts = df["Street Name"].value_counts()
+            non_critical_roads = road_counts[road_counts < crash_threshold].index.tolist()
+            df_modified.loc[df_modified["Street Name"].isin(non_critical_roads), "Street Name"] = (
+                "Non Critical Road"
+            )
         
         # Get the script directory
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -119,8 +259,12 @@ def identify_and_replace_non_critical_roads(filepath, crash_threshold=12):
         # Save the modified CSV
         df_modified.to_csv(output_file, index=False)
         
-        # Sort and display non-critical roads with their crash counts
-        non_critical_with_counts = [(road, road_counts[road]) for road in non_critical_roads]
+        # Sort and display non-critical roads (or road+section pairs) with crash counts
+        if "Section" in df_modified.columns:
+            count_keys = non_critical_pairs
+        else:
+            count_keys = non_critical_roads
+        non_critical_with_counts = [(k, road_counts[k]) for k in count_keys]
         non_critical_with_counts.sort(key=lambda x: x[1], reverse=True)
         
         return {
@@ -135,7 +279,7 @@ def identify_and_replace_non_critical_roads(filepath, crash_threshold=12):
         return None
     
 #   #   #   #   #   #   #   #   #   #   #   #
-#               Step 3 Functions            #
+#               Step 4 Functions            #
 #   #   #   #   #   #   #   #   #   #   #   #
 
 # This file creates a general reference CSV with information about each type of unique road in the dataset
@@ -143,78 +287,169 @@ def identify_and_replace_non_critical_roads(filepath, crash_threshold=12):
 # It also allows the negative sampling function, create_negative_samples, to create realistic negative samples by using actual road attributes from the dataset.
 def create_road_reference_csv(filepath):
     """
-    Create a CSV file with unique road information from the modified dataset.
-    This will be used as a reference for negative sampling.
+    Create a CSV file with unique road **segments** from the modified dataset: each row is
+    a ``(Road Name, Section)`` pair (Section replaces the former rural/urban column in the
+    reference schema). Rows without a meaningful section share one bucket (empty / ``No Data``).
+    Used for negative sampling keyed by name + section.
     
     Args:
         filepath (str): Path to the modified CSV file
         
     Returns:
         dict: Dictionary containing:
-            - 'unique_roads': Number of unique roads found
+            - 'unique_roads': Number of unique road segments found
             - 'output_file': Path to the created reference file
             - 'road_list': List of road dictionaries
     """
     try:
         # Read the modified CSV file
         df = pd.read_csv(filepath)
-        
-        # Get unique combinations of Road Name, Rural Urban Type, County, and City
-        # Group by Street Name and get the first occurrence of each group's attributes
-        road_reference = df.groupby('Street Name').agg({
-            'Rural Urban Type': 'first',
-            'County': 'first',
-            'City': lambda x: x.mode()[0] if not x.mode().empty else x.iloc[0]  # Most common city for that road
-        }).reset_index()
-        
-        # Rename columns for clarity
-        road_reference.columns = ['Road Name', 'Rural Urban Type', 'County', 'City']
-        
-        # Sort by Road Name for easier reference
-        road_reference = road_reference.sort_values('Road Name').reset_index(drop=True)
-        
-        # Get the script directory
+        if "Section" not in df.columns:
+            df = df.copy()
+            df["Section"] = ""
+
+        df = df.copy()
+        df = df.loc[df["Street Name"].notna()].copy()
+        df["_section_key"] = df["Section"].map(_normalize_section_value)
+
+        road_reference = (
+            df.groupby(["Street Name", "_section_key"], dropna=False)
+            .agg(
+                {
+                    "Section": "first",
+                    "County": "first",
+                    "City": lambda x: x.mode()[0] if not x.mode().empty else x.iloc[0],
+                }
+            )
+            .reset_index()
+            .drop(columns=["_section_key"])
+        )
+
+        road_reference.rename(columns={"Street Name": "Road Name"}, inplace=True)
+        road_reference = road_reference[["Road Name", "Section", "County", "City"]]
+        road_reference = road_reference.sort_values(["Road Name", "Section"]).reset_index(drop=True)
+
         script_dir = os.path.dirname(os.path.abspath(__file__))
         output_file = os.path.join(script_dir, "RoadReference.csv")
-        
-        # Save the reference CSV
+
         road_reference.to_csv(output_file, index=False)
-        
-        # Show road type distribution
-        type_counts = road_reference['Rural Urban Type'].value_counts()
-        
+
+        section_counts = road_reference["Section"].fillna("").astype(str).value_counts()
+
         return {
-            'unique_roads': len(road_reference),
-            'output_file': output_file,
-            'road_list': road_reference.to_dict('records')
+            "unique_roads": len(road_reference),
+            "output_file": output_file,
+            "road_list": road_reference.to_dict("records"),
+            "section_value_counts": section_counts,
         }
-        
+
     except Exception as e:
         print(f"Error creating road reference CSV: {e}")
         return None
 
 #   #   #   #   #   #   #   #   #   #   #   #
-#               Step 4 Functions            #
+#               Step 5 Functions            #
 #   #   #   #   #   #   #   #   #   #   #   #
 
 # This will loop through all the modified roads (Non Critical Road) and create negative samples for each road, each hour, and each day of the year
 # This function will take a few minutes to run and will update the user of its progress in the console log
 # Out put is negative_samples.csv
-#*************At present, it does not contain any way to reasonably predict weather ************************
-def create_negative_samples(year, road_reference_file="RoadReference.csv", final_weather_file='FinalWeather.csv', output_filename="NegativeSamples.csv"):
-    """
-    Create negative samples (non-crash events) for every road, every hour, every day of the year.
-    Uses random weather and surface conditions, but takes road attributes from road_reference.csv.
-    
-    Args:
+_CITY_WEATHER_LOOKUP_CACHE: dict[tuple[str, int], dict[tuple[str, str], tuple[str, str]]] = {}
 
-        road_reference_file (str): Path to the road reference CSV
-        output_filename (str): Name for the output file
-        final_weather_file (str | None): Path to the final weather CSV for lookup. If None, random weather is used.
+
+def _safe_name_for_file(name: str) -> str:
+    """Match ``weather/open_download.py`` naming for ``weather_csvs/<stem>_<year>.csv``."""
+    s = str(name).strip()
+    for c in r'<>:"/\|?*':
+        s = s.replace(c, "_")
+    return s or "place"
+
+
+def _hour_key_from_city_csv_hour(val: object) -> str | None:
+    if pd.isna(val):
+        return None
+    try:
+        return f"{int(float(val)):02d}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_city_weather_lookup(weather_csv_path: Path) -> dict[tuple[str, str], tuple[str, str]]:
+    """
+    Build (date ``YYYY-MM-DD``, hour ``00``..``23``) -> (weather label, road label)
+    from an Open-Meteo export CSV (3-line preamble + header with ``date``, ``hour``,
+    ``weather``, ``Road``).
+    """
+    if not weather_csv_path.is_file():
+        return {}
+    df = pd.read_csv(weather_csv_path, skiprows=3)
+    colmap = {str(c).lower(): c for c in df.columns}
+    for need in ("date", "hour", "weather", "road"):
+        if need not in colmap:
+            print(
+                f"Warning: {weather_csv_path.name} missing column like '{need}' "
+                f"(have: {list(df.columns)}); skipping file."
+            )
+            return {}
+    dcol, hcol, wcol, rcol = colmap["date"], colmap["hour"], colmap["weather"], colmap["road"]
+    out: dict[tuple[str, str], tuple[str, str]] = {}
+    for _, row in df.iterrows():
+        ds = str(row[dcol]).strip()
+        hk = _hour_key_from_city_csv_hour(row[hcol])
+        if hk is None:
+            continue
+        key = (ds, hk)
+        if key not in out:
+            out[key] = (str(row[wcol]).strip(), str(row[rcol]).strip())
+    return out
+
+
+def _get_city_weather_lookup(city: object, year: int) -> dict[tuple[str, str], tuple[str, str]]:
+    if city is None or (isinstance(city, float) and pd.isna(city)):
+        return {}
+    s = str(city).strip()
+    if not s:
+        return {}
+    stem = _safe_name_for_file(s)
+    ck = (stem, year)
+    if ck not in _CITY_WEATHER_LOOKUP_CACHE:
+        path = (
+            Path(__file__).resolve().parent
+            / "weather"
+            / "weather_csvs"
+            / f"{stem}_{year}.csv"
+        )
+        _CITY_WEATHER_LOOKUP_CACHE[ck] = _read_city_weather_lookup(path)
+    return _CITY_WEATHER_LOOKUP_CACHE[ck]
+
+
+def create_negative_samples(
+    year,
+    road_reference_file="RoadReference.csv",
+    final_weather_file: str | None = "FinalWeather.csv",
+    output_filename="NegativeSamples.csv",
+):
+    """
+    Create negative samples (non-crash events) for every **road segment** (``Road Name`` +
+    ``Section`` from ``RoadReference.csv``), every hour, every day of the year.
+
+    Weather and surface (road) conditions come from ``weather/weather_csvs/<City>_<year>.csv``
+    for each road's ``City`` (same stem rules as ``open_download``), keyed by calendar date
+    and hour. If that file or key is missing, falls back to ``final_weather_file`` when it
+    exists (Date / Hour / Weather / Road), then to clear / dry defaults.
+
+    Args:
+        road_reference_file: Path to the road reference CSV (columns ``Road Name``, ``Section``, …).
+        output_filename: Name for the output file in the script directory.
+        final_weather_file: Optional legacy global lookup CSV; pass ``None`` to disable.
+
     Returns:
         dict: Summary statistics about the generated data
     """
     try:
+        global _CITY_WEATHER_LOOKUP_CACHE
+        _CITY_WEATHER_LOOKUP_CACHE.clear()
+
         script_dir = os.path.dirname(os.path.abspath(__file__))
 
         road_reference_path = road_reference_file
@@ -225,76 +460,85 @@ def create_negative_samples(year, road_reference_file="RoadReference.csv", final
         if weather_file_path and not os.path.isabs(weather_file_path):
             weather_file_path = os.path.join(script_dir, weather_file_path)
 
-        # Read the road reference data
         road_df = pd.read_csv(road_reference_path)
 
-        
-        # Check if final weather file exists
-        if(weather_file_path and os.path.exists(weather_file_path)):
-            weather_lookup = _build_weather_lookup(weather_file_path)
-            print(f"Weather lookup built from {weather_file_path} with {len(weather_lookup)} entries.")
-        else:
-            weather_lookup = {}
-            print(f"No valid FinalWeather file found at {weather_file_path}. Cancelling negative sample generation.")
-            return None
+        global_lookup: dict[tuple[str, str], tuple[str, str]] = {}
+        if weather_file_path and os.path.exists(weather_file_path):
+            global_lookup = _build_weather_lookup(weather_file_path)
+            print(
+                f"Optional global weather lookup: {len(global_lookup)} entries from {weather_file_path}."
+            )
+        elif final_weather_file:
+            print(
+                f"No FinalWeather at {weather_file_path}; "
+                "using only per-city files under weather/weather_csvs/ (and defaults)."
+            )
 
-        # Days of week
-        days_of_week = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
-        
-        # Generate all hours and dates for the year
+        cities = road_df["City"].dropna().astype(str).unique().tolist()
+        cities_with_files = sum(1 for c in cities if len(_get_city_weather_lookup(c, year)) > 0)
+        print(
+            f"Per-city Open-Meteo CSVs ({year}): {cities_with_files}/{len(cities)} "
+            f"distinct cities have data under weather/weather_csvs/"
+        )
 
         start_date = datetime(year, 1, 1)
         end_date = datetime(year, 12, 31, 23, 59, 59)
-        
+
         rows = []
         crash_id_counter = 30000000
-        
+
         print("\n" + "=" * 70)
         print("GENERATING NEGATIVE SAMPLES")
         print("=" * 70)
-        print(f"Total roads: {len(road_df)}")
-        print(f"Generating records for every hour of the year...")
+        print(f"Total road segments (name + section): {len(road_df)}")
+        print("Generating records for every hour of the year...")
         print("-" * 70)
-        
-        # Iterate through each road
+
         current_date = start_date
         while current_date <= end_date:
             date_str = current_date.strftime("%Y-%m-%d")
             day_name = current_date.strftime("%A").upper()
-            if(current_date.day == 1 and current_date.hour == 0):
-                print(f"Processing Month: {current_date.strftime('%B %Y')} ({date_str}) - Day: {day_name}")
+            if current_date.day == 1 and current_date.hour == 0:
+                print(
+                    f"Processing Month: {current_date.strftime('%B %Y')} ({date_str}) - Day: {day_name}"
+                )
 
             for hour in range(24):
                 hour_key = f"{hour:02d}"
                 hour_range = f"{hour:02d}:00 - {hour:02d}:59"
 
-                weather_condition, surface_condition = weather_lookup.get(
-                    (date_str, hour_key),
-                    ("1 - CLEAR", "1 - DRY")
-                )
-
                 for _, road in road_df.iterrows():
-                    rows.append({
-                        "Crash ID": crash_id_counter,
-                        "City": road["City"],
-                        "County": road["County"],
-                        "Crash Date": date_str,
-                        "Crash Month": current_date.month,
-                        "Crash Time": f"{hour:02d}00",
-                        "Crash Year": year,
-                        "Day of Week": day_name,
-                        "Hour of Day": hour_range,
-                        "Road Class": "CITY STREET",
-                        "Rural Urban Type": road["Rural Urban Type"],
-                        "Street Name": road["Road Name"],
-                        "Surface Condition": surface_condition,
-                        "Weather Condition": weather_condition,
-                        "Crash": 0
-                    })
+                    city_lookup = _get_city_weather_lookup(road["City"], year)
+                    weather_condition, surface_condition = city_lookup.get(
+                        (date_str, hour_key),
+                        global_lookup.get(
+                            (date_str, hour_key),
+                            ("1 - CLEAR", "1 - DRY"),
+                        ),
+                    )
+                    sec = road["Section"] if "Section" in road_df.columns else ""
+                    if pd.isna(sec):
+                        sec = ""
+                    rows.append(
+                        {
+                            "City": road["City"],
+                            "County": road["County"],
+                            "Crash Date": date_str,
+                            "Crash Month": current_date.month,
+                            "Crash Time": f"{hour:02d}00",
+                            "Crash Year": year,
+                            "Day of Week": day_name,
+                            "Hour of Day": hour_range,
+                            "Road Class": "CITY STREET",
+                            "Street Name": road["Road Name"],
+                            "Section": sec,
+                            "Surface Condition": surface_condition,
+                            "Weather Condition": weather_condition,
+                            "Crash": 0,
+                        }
+                    )
                     crash_id_counter += 1
 
-                
-                # Move to next day
             current_date += timedelta(days=1)
 
         negative_df = pd.DataFrame(rows)
@@ -368,7 +612,7 @@ def _build_weather_lookup(final_weather_path: str) -> dict[tuple[str, str], tupl
 def combine_crash_and_negative_samples(crash_file, negative_file="NegativeSamples.csv", output_filename="TrainingData.csv"):
     """
     Combine positive crash samples with negative samples, removing any negative samples
-    that conflict with actual crash data (same road, date, and hour).
+    that conflict with actual crash data (same street name, section when present, date, and hour).
     
     Args:
         crash_file (str): Path to the crash labeled CSV file
@@ -405,20 +649,9 @@ def combine_crash_and_negative_samples(crash_file, negative_file="NegativeSample
 
         print("Building crash event index...")
         for _, row in crash_df.iterrows():
-            # Skip if Street Name is missing
-            if pd.isna(row['Street Name']):
+            if pd.isna(row["Street Name"]):
                 continue
-            
-            # Extract hour from 'Hour of Day' field (e.g., "23:00 - 23:59" -> "23")
-            hour = row['Hour of Day'].split(':')[0]
-            
-            # Create a tuple key: (street_name, crash_date, hour)
-            event_key = (
-                str(row['Street Name']).strip().upper(),
-                row['Crash Date'],
-                hour
-            )
-            crash_events.add(event_key)
+            crash_events.add(_event_key_street_section_date_hour(row))
         
         print(f"Total crash events indexed: {len(crash_events)}")
         print("-" * 70)
@@ -429,20 +662,11 @@ def combine_crash_and_negative_samples(crash_file, negative_file="NegativeSample
         skipped_count = 0
         
         for _, row in negative_df.iterrows():
-            # Skip if Street Name is missing
-            if pd.isna(row['Street Name']):
+            if pd.isna(row["Street Name"]):
                 continue
-            
-            # Extract hour from 'Hour of Day' field
-            hour = row['Hour of Day'].split(':')[0]
-            
-            # Create event key for this negative sample
-            event_key = (
-                str(row['Street Name']).strip().upper(),
-                row['Crash Date'],
-                hour
-            )
-            
+
+            event_key = _event_key_street_section_date_hour(row)
+
             # Only add if there's no conflicting crash event
             if event_key not in crash_events:
                 filtered_negative.append(row)
@@ -499,59 +723,110 @@ def _abs_in_script_dir(filename: str) -> str:
     return os.path.join(script_dir, filename)
 
 
+def _resolve_crash_data_path(crash_data_source: str | Path) -> str:
+    """Absolute path: use as-is; relative paths are resolved against this file's directory."""
+    p = Path(crash_data_source)
+    if p.is_absolute():
+        return str(p)
+    return str(Path(__file__).resolve().parent / p)
+
+
+def training_data_production(crash_data_source: str | Path) -> dict[str, object] | None:
+    """
+    Run the full crash CSV → training dataset pipeline for a single crash export.
+
+    Steps (in order): add ``Crash`` column; combine street + section (optional); replace non-critical
+    roads using mean crashes per road or per (road, section) when ``Section`` exists (rounded up);
+    build ``RoadReference.csv``;
+    build ``NegativeSamples.csv`` (weather from ``weather/weather_csvs/<City>_<year>.csv``,
+    optional ``FinalWeather.csv`` fallback);
+    merge into ``TrainingData.csv``.
+
+    Intermediate files (``*_modified.csv``, ``RoadReference.csv``, ``NegativeSamples.csv``)
+    are written in the same directory as this script, matching ``identify_and_replace_non_critical_roads``.
+
+    Args:
+        crash_data_source: Path to the raw crash CSV (e.g. ``Dallas2025.csv`` relative to
+            this file's folder, or an absolute path). The file is updated in place for the
+            first two steps.
+
+    Returns:
+        A dict with paths and counts from each stage, or ``None`` if a step fails
+        (e.g. missing weather file for negative sampling).
+    """
+    crash_path = _resolve_crash_data_path(crash_data_source)
+    if not os.path.isfile(crash_path):
+        raise FileNotFoundError(f"Crash data file not found: {crash_path}")
+
+    summary: dict[str, object] = {"crash_source": crash_path}
+
+    file_year = int(pd.read_csv(crash_path, nrows=1)["Crash Year"].iloc[0])
+    summary["crash_year"] = file_year
+
+    print("Task [1/6]: Adding crash column...")
+    r1 = add_crash_column(crash_path)
+    if r1 is None:
+        print("Failed at add_crash_column.")
+        return None
+    summary["add_crash_column"] = r1
+
+    average_crashes = get_average_crashes_per_road(crash_path)
+    if average_crashes is None:
+        print("Failed: could not compute average crashes per road.")
+        return None
+    summary["average_crashes_per_road_threshold"] = average_crashes
+
+    # print("Task [2/6]: Combining street name and segment...")
+    # combine_street_name_and_segment(crash_path)
+    # print("Street name and segment combined.\n")
+
+    print("Task [3/6]: Removing non-critical roads and creating modified CSV...")
+    nc = identify_and_replace_non_critical_roads(crash_path, crash_threshold=average_crashes)
+    if nc is None:
+        print("Failed at identify_and_replace_non_critical_roads.")
+        return None
+    summary["non_critical_roads"] = nc
+    modified_file = nc["output_file"]
+
+    print("Task [4/6]: Creating road reference CSV...")
+    rr = create_road_reference_csv(modified_file)
+    if rr is None:
+        print("Failed at create_road_reference_csv.")
+        return None
+    summary["road_reference"] = rr
+
+    print("Task [5/6]: Creating negative samples...")
+    neg = create_negative_samples(
+        file_year,
+        road_reference_file="RoadReference.csv",
+        final_weather_file="FinalWeather.csv",
+        output_filename="NegativeSamples.csv",
+    )
+    if neg is None:
+        print("Failed at create_negative_samples.")
+        return None
+    summary["negative_samples"] = neg
+
+    print("Task [6/6]: Combining crash and negative samples into training data...")
+    combo = combine_crash_and_negative_samples(
+        crash_file=modified_file,
+        negative_file="NegativeSamples.csv",
+        output_filename="TrainingData.csv",
+    )
+    if combo is None:
+        print("Failed at combine_crash_and_negative_samples.")
+        return None
+    summary["training_data"] = combo
+
+    print("All tasks completed.")
+    print(f"Final output: {combo.get('output_file')}")
+    return summary
+
 
 #   #   #   #   #   #   #   #   #   #   #   #
-#               Main Functions              #
+#               CLI                         #
 #   #   #   #   #   #   #   #   #   #   #   #
 
 if __name__ == "__main__":
-    #   #   #   #   #   #   #   #   # 
-    #           File Path           #
-    #   #   #   #   #   #   #   #   # 
-    file = _abs_in_script_dir("Dallas2025.csv")
-
-    # This controls what commands get run
-    # what_to_run[0] = add crash column to modified csv
-    # what_to_run[1] = identify and replace non critical roads and create modified csv
-    # what_to_run[2] = create road reference csv
-    # what_to_run[3] = create negative samples
-    # what_to_run[4] = combine crash and negative samples into training data csv
-
-    #   #   #   #   #   #   #   #   #   #   #   #   #
-    #           All these should be TRUE            #
-    #   #   #   #   #   #   #   #   #   #   #   #   #
-    what_to_run = [True, True, True, True, True]
-
-    # Gets the year
-    file_year = int(pd.read_csv(file, nrows=1)["Crash Year"].iloc[0])
-
-    if(what_to_run[0]):
-        print("Task[1/5]: Adding crash column...")
-        add_crash_column(file)
-        print("Crash column added to modified CSV.\n")
-
-    average_crashes = get_average_crashes_per_road(file)
-
-    if(what_to_run[1]):
-        print("Task[2/5]: Removing non critical roads and creating modified CSV...")
-        identify_and_replace_non_critical_roads(file, crash_threshold=average_crashes)
-        print("Non critical roads replaced and modified CSV created.\n")
-
-    modified_file = _abs_in_script_dir(f"{os.path.splitext(os.path.basename(file))[0]}_modified.csv")
-    if(what_to_run[2]):
-        print("Task[3/5]: Creating road reference CSV...")
-        create_road_reference_csv(modified_file)
-        print("Road reference CSV created.\n")
-
-    if(what_to_run[3]):
-        print("Task[4/5]: Creating negative samples...")
-        create_negative_samples(file_year, road_reference_file="RoadReference.csv", final_weather_file='FinalWeather.csv', output_filename="NegativeSamples.csv")
-        print("Negative samples created.\n")    
-
-    if(what_to_run[4]):
-        print("Task[5/5]: Combining crash and negative samples into training data...")
-        combine_crash_and_negative_samples(crash_file=modified_file, negative_file="NegativeSamples.csv", output_filename="TrainingData.csv")
-        print("Training data created.\n")
-    
-    print("All tasks completed.")
-    print("Final output: TrainingData.csv")
+    cli_source = sys.argv[1] if len(sys.argv) > 1 else "Dallas2025.csv"
+    training_data_production(cli_source)
