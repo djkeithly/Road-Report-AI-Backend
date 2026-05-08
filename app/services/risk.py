@@ -374,23 +374,54 @@ def get_model_runtime_metadata() -> dict[str, str | int | float | bool]:
     model_path = Path(
         "/home/bob/Programming/road-report/Road-Report-AI-Backend/app/services/logistic_regression_model.pth"
     )
+    cols_path = Path(
+        "/home/bob/Programming/road-report/Road-Report-AI-Backend/app/services/feature_columns.pkl"
+    )
+
     if (
         not model_path.exists()
         and (Path(__file__).resolve().parents[2] / model_path).exists()
     ):
         model_path = Path(__file__).resolve().parents[2] / model_path
+        cols_path = Path(__file__).resolve().parents[2] / cols_path
+
+    # Default fallback values for the route
+    input_size = 0
 
     if not model_path.exists():
         return {
             "available": False,
             "model_path": str(model_path),
             "message": "Logistic Regression model artifact not found.",
+            "input_size": input_size,
+            "rows_used": 0,
+            "threshold": 0.5,
+            "accuracy": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
         }
+
+    # If we have the columns file, we can dynamically get the real input size
+    if cols_path.exists():
+        try:
+            with open(cols_path, "rb") as f:
+                feature_columns = pickle.load(f)
+                input_size = len(feature_columns)
+        except Exception:
+            pass
 
     return {
         "available": True,
         "model_path": str(model_path),
         "message": "Using PyTorch Logistic Regression model",
+        "input_size": input_size,
+        "rows_used": 0,  # Not currently tracked by the new training script
+        "threshold": 0.5,  # Default threshold
+        "accuracy": 0.0,  # Placeholder metrics to satisfy the frontend
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
     }
 
 
